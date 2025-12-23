@@ -18,24 +18,36 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
-    // 模拟文件注册表: 文件名 -> DataNode地址列表 (这里简单起见，只存一个地址)
-    // 格式: filename -> "host:port"
-    private static final Map<String, String> fileRegistry = new ConcurrentHashMap<>();
+    // 文件名映射: filename -> "hash"
+    private static final Map<String, String> filenameToHash = new ConcurrentHashMap<>();
 
-    // 模拟活跃的 DataNode 列表 (实际应由 DataNode 注册上来)
+    // 哈希索引: hash -> "host:port"
+    private static final Map<String, String> hashToStorage = new ConcurrentHashMap<>();
+
+    // 元数据持久化管理器
+    private static final MetadataManager metadataManager = new MetadataManager();
+
+    // 模拟活跃的 DataNode 列表
     private static final List<String> dataNodes = new ArrayList<>();
 
     static {
         // 硬编码一个 DataNode 用于演示
         dataNodes.add("localhost:8080");
+        
+        // 启动时恢复元数据
+        metadataManager.recover(filenameToHash, hashToStorage);
     }
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exception {
         CommandType type = packet.getCommandType();
-        System.out.println("NameNode 收到请求: " + type);
+        // 生产环境高并发下建议降低日志级别或去掉
+        // System.out.println("NameNode 收到请求: " + type);
 
         switch (type) {
+            case NAMENODE_CHECK_EXISTENCE:
+                handleCheckExistence(ctx, packet);
+                break;
             case NAMENODE_REQUEST_UPLOAD_LOC:
                 handleUploadLocRequest(ctx);
                 break;
@@ -50,56 +62,65 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         }
     }
 
-    /**
-     * 处理上传位置请求
-     * 简单负载均衡：随机选择一个 DataNode 返回
-     */
+    private void handleCheckExistence(ChannelHandlerContext ctx, Packet packet) {
+        String hash = new String(packet.getData(), StandardCharsets.UTF_8);
+        String storageAddr = hashToStorage.get(hash);
+        
+        if (storageAddr != null) {
+            System.out.println("命中秒传: Hash=" + hash);
+            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, storageAddr.getBytes(StandardCharsets.UTF_8));
+        } else {
+            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_NOT_EXIST, "Not Found".getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
     private void handleUploadLocRequest(ChannelHandlerContext ctx) {
         if (dataNodes.isEmpty()) {
             sendResponse(ctx, CommandType.ERROR, "无可用 DataNode".getBytes(StandardCharsets.UTF_8));
             return;
         }
         
-        // 随机选择一个 DataNode
         String selectedNode = dataNodes.get(ThreadLocalRandom.current().nextInt(dataNodes.size()));
         sendResponse(ctx, CommandType.NAMENODE_RESPONSE_UPLOAD_LOC, selectedNode.getBytes(StandardCharsets.UTF_8));
     }
 
-    /**
-     * 处理文件提交请求
-     * 客户端上传完毕后，告知 NameNode 文件位置
-     * 数据格式: "filename|host:port"
-     */
     private void handleCommitFile(ChannelHandlerContext ctx, Packet packet) {
         String data = new String(packet.getData(), StandardCharsets.UTF_8);
         String[] parts = data.split("\\|");
-        if (parts.length != 2) {
+        if (parts.length != 3) {
             sendResponse(ctx, CommandType.ERROR, "格式错误".getBytes(StandardCharsets.UTF_8));
             return;
         }
         
         String filename = parts[0];
-        String address = parts[1];
+        String hash = parts[1];
+        String address = parts[2];
         
-        fileRegistry.put(filename, address);
-        System.out.println("文件已注册: " + filename + " -> " + address);
+        // 1. 先持久化
+        metadataManager.logAddFile(filename, hash, address);
+
+        // 2. 再更新内存
+        filenameToHash.put(filename, hash);
+        hashToStorage.put(hash, address);
+        
+        System.out.println("文件已注册: " + filename);
         
         sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, "OK".getBytes(StandardCharsets.UTF_8));
     }
 
-    /**
-     * 处理下载位置请求
-     * 查找文件所在的 DataNode
-     */
     private void handleDownloadLocRequest(ChannelHandlerContext ctx, Packet packet) {
         String filename = new String(packet.getData(), StandardCharsets.UTF_8);
-        String address = fileRegistry.get(filename);
+        String hash = filenameToHash.get(filename);
         
-        if (address != null) {
-            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, address.getBytes(StandardCharsets.UTF_8));
-        } else {
-            sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));
+        if (hash != null) {
+            String address = hashToStorage.get(hash);
+            if (address != null) {
+                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, address.getBytes(StandardCharsets.UTF_8));
+                return;
+            }
         }
+        
+        sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));
     }
 
     private void sendResponse(ChannelHandlerContext ctx, CommandType type, byte[] data) {
