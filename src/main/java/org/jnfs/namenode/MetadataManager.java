@@ -1,13 +1,7 @@
 package org.jnfs.namenode;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
+import java.io.*;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 元数据管理器
@@ -64,7 +58,7 @@ public class MetadataManager {
     public synchronized void logAddFile(String filename, String hash, String address) {
         // 格式: ADD|filename|hash|address
         String record = String.format("ADD|%s|%s|%s", filename, hash, address);
-        
+
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(logFile, true))) {
             writer.write(record);
             writer.newLine();
