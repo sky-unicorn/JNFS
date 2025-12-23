@@ -1,0 +1,51 @@
+package org.jnfs.example;
+
+import org.jnfs.driver.JNFSDriver;
+
+import java.io.File;
+
+/**
+ * 示例应用：模拟客户端引入 Driver SDK 进行文件操作
+ */
+public class ExampleApp {
+
+    public static void main(String[] args) {
+        // 1. 初始化 Driver (连接 NameNode)
+        JNFSDriver driver = new JNFSDriver("localhost", 9090);
+        
+        try {
+            // 2. 准备文件 (使用之前的测试文件)
+            String filePath = "E:\\back-up\\backup.7z";
+            File file = new File(filePath);
+            
+            // 如果大文件不存在，使用本地测试文件
+            if (!file.exists()) {
+                System.out.println("警告: 未找到目标文件 " + filePath);
+                file = new File("large_test.dat");
+                if (!file.exists()) {
+                    System.out.println("创建测试文件...");
+                    try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file, "rw")) {
+                        raf.setLength(10 * 1024 * 1024); // 10 MB
+                    }
+                }
+            }
+            System.out.println("开始上传文件: " + file.getName());
+
+            long start = System.currentTimeMillis();
+            
+            // 3. 调用 Driver 上传
+            driver.uploadFile(file);
+            
+            long end = System.currentTimeMillis();
+            System.out.println("--------------------------------------------------");
+            System.out.printf("总耗时 (含元数据交互): %.2f 秒%n", (end - start) / 1000.0);
+            System.out.println("--------------------------------------------------");
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            // 4. 关闭资源
+            driver.close();
+        }
+    }
+}
