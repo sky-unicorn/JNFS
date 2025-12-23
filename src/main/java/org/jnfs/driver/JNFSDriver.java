@@ -47,32 +47,29 @@ public class JNFSDriver {
 
     /**
      * 上传文件
+     * @return 存储编号 (Storage ID)
      */
-    public void uploadFile(File file) throws Exception {
+    public String uploadFile(File file) throws Exception {
         if (!file.exists()) {
             throw new IOException("文件不存在: " + file.getAbsolutePath());
         }
 
-        // 1. 计算文件摘要 (Hash)
         System.out.println("[Driver] 正在计算文件摘要...");
         String fileHash = DigestUtil.sha256Hex(file);
         System.out.println("[Driver] 文件摘要 (SHA256): " + fileHash);
 
-        // 2. 申请上传 (并发控制 + 秒传检查)
+        // 申请上传 (并发控制 + 秒传检查)
         String existingAddr = requestUploadPermission(fileHash);
         
         if (existingAddr != null) {
-            // --- 秒传逻辑 ---
             System.out.println("[Driver] 发现相同文件 (节点: " + existingAddr + ")，触发秒传...");
-            commitFile(file.getName(), fileHash, existingAddr);
-            System.out.println("[Driver] 秒传成功！");
-            return;
+            String storageId = commitFile(file.getName(), fileHash, existingAddr);
+            System.out.println("[Driver] 秒传成功！存储编号: " + storageId);
+            return storageId;
         }
 
-        // --- 普通上传逻辑 ---
         System.out.println("[Driver] 获得上传许可，开始普通上传...");
 
-        // 3. 获取上传位置
         String dataNodeAddr = getDataNodeForUpload();
         System.out.println("[Driver] 获得上传节点: " + dataNodeAddr);
         
@@ -80,35 +77,29 @@ public class JNFSDriver {
         String dnHost = parts[0];
         int dnPort = Integer.parseInt(parts[1]);
 
-        // 4. 上传数据到 DataNode
         uploadToDataNode(dnHost, dnPort, file);
         System.out.println("[Driver] 文件数据传输完成");
 
-        // 5. 提交元数据到 NameNode
-        commitFile(file.getName(), fileHash, dataNodeAddr);
-        System.out.println("[Driver] 文件元数据提交完成");
+        String storageId = commitFile(file.getName(), fileHash, dataNodeAddr);
+        System.out.println("[Driver] 文件元数据提交完成，存储编号: " + storageId);
+        
+        return storageId;
     }
 
     // --- 内部辅助方法 ---
 
-    /**
-     * 向 NameNode 申请上传许可
-     * 如果返回 WAIT，则循环等待
-     * 如果返回 EXIST，则返回地址 (触发秒传)
-     * 如果返回 ALLOW，则返回 null (开始上传)
-     */
     private String requestUploadPermission(String hash) throws Exception {
         while (true) {
             Packet response = sendRequestToNameNode(CommandType.NAMENODE_PRE_UPLOAD, hash.getBytes(StandardCharsets.UTF_8));
             CommandType type = response.getCommandType();
 
             if (type == CommandType.NAMENODE_RESPONSE_ALLOW) {
-                return null; // 允许上传
+                return null;
             } else if (type == CommandType.NAMENODE_RESPONSE_EXIST) {
-                return new String(response.getData(), StandardCharsets.UTF_8); // 秒传
+                return new String(response.getData(), StandardCharsets.UTF_8);
             } else if (type == CommandType.NAMENODE_RESPONSE_WAIT) {
                 System.out.println("[Driver] 文件正在上传中，等待重试...");
-                Thread.sleep(1000); // 等待1秒后重试
+                Thread.sleep(1000);
             } else {
                 throw new IOException("预上传申请失败: " + type);
             }
@@ -123,13 +114,15 @@ public class JNFSDriver {
         return new String(response.getData(), StandardCharsets.UTF_8);
     }
 
-    private void commitFile(String filename, String hash, String dataNodeAddr) throws Exception {
+    private String commitFile(String filename, String hash, String dataNodeAddr) throws Exception {
         String payload = filename + "|" + hash + "|" + dataNodeAddr;
         Packet response = sendRequestToNameNode(CommandType.NAMENODE_COMMIT_FILE, payload.getBytes(StandardCharsets.UTF_8));
         
         if (response.getCommandType() == CommandType.ERROR) {
              throw new IOException("提交元数据失败: " + new String(response.getData(), StandardCharsets.UTF_8));
         }
+        
+        return new String(response.getData(), StandardCharsets.UTF_8);
     }
 
     private void uploadToDataNode(String host, int port, File file) throws Exception {

@@ -33,12 +33,13 @@ public class ExampleApp {
 
             long start = System.currentTimeMillis();
             
-            // 3. 调用 Driver 上传
-            driver.uploadFile(file);
+            // 3. 调用 Driver 上传，并获取存储编号
+            String storageId = driver.uploadFile(file);
             
             long end = System.currentTimeMillis();
             System.out.println("--------------------------------------------------");
-            System.out.printf("总耗时 (含元数据交互): %.2f 秒%n", (end - start) / 1000.0);
+            System.out.printf("总耗时: %.2f 秒%n", (end - start) / 1000.0);
+            System.out.println("存储编号 (Storage ID): " + storageId);
             System.out.println("--------------------------------------------------");
 
         } catch (Exception e) {

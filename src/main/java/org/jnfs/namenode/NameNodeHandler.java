@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -25,6 +26,13 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     // 哈希索引: hash -> "host:port"
     private static final Map<String, String> hashToStorage = new ConcurrentHashMap<>();
 
+    // 存储编号索引: hash -> "storageId"
+    private static final Map<String, String> hashToId = new ConcurrentHashMap<>();
+
+    // 已持久化ID的 Hash 集合 (用于去重)
+    // 仅当 hash 在此集合中时，才视为 ID 已安全落盘，不再写入日志
+    private static final Set<String> persistedHashes = ConcurrentHashMap.newKeySet();
+
     // 正在上传中的 Hash 集合 (并发控制)
     private static final Set<String> pendingUploads = ConcurrentHashMap.newKeySet();
 
@@ -35,8 +43,8 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     private static final List<String> dataNodes = new ArrayList<>();
 
     static {
-        // 启动时恢复元数据
-        metadataManager.recover(filenameToHash, hashToStorage);
+        // 启动时恢复元数据，并填充 persistedHashes
+        metadataManager.recover(filenameToHash, hashToStorage, hashToId, persistedHashes);
     }
 
     /**
@@ -85,31 +93,22 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         }
     }
 
-    /**
-     * 处理预上传申请 (并发控制核心逻辑)
-     * Payload: hash
-     */
     private void handlePreUpload(ChannelHandlerContext ctx, Packet packet) {
         String hash = new String(packet.getData(), StandardCharsets.UTF_8);
         
-        // 全局加锁或同步块，确保状态检查和更新的原子性
-        // 虽然 Map 是并发安全的，但我们需要组合检查多个条件
         synchronized (hashToStorage) {
-            // 1. 再次检查是否已存在 (可能刚刚被别人传完)
             String storageAddr = hashToStorage.get(hash);
             if (storageAddr != null) {
                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, storageAddr.getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
-            // 2. 检查是否有人正在上传
             if (pendingUploads.contains(hash)) {
                 System.out.println("并发上传冲突，通知等待: Hash=" + hash);
                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_WAIT, "Waiting".getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
-            // 3. 标记为正在上传
             pendingUploads.add(hash);
             System.out.println("允许上传: Hash=" + hash);
             sendResponse(ctx, CommandType.NAMENODE_RESPONSE_ALLOW, "OK".getBytes(StandardCharsets.UTF_8));
@@ -122,7 +121,6 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             return;
         }
         
-        // 简单负载均衡: 随机选择
         String selectedNode = dataNodes.get(ThreadLocalRandom.current().nextInt(dataNodes.size()));
         sendResponse(ctx, CommandType.NAMENODE_RESPONSE_UPLOAD_LOC, selectedNode.getBytes(StandardCharsets.UTF_8));
     }
@@ -138,35 +136,36 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         String filename = parts[0];
         String hash = parts[1];
         String address = parts[2];
-        
+        String storageId;
+
         synchronized (hashToStorage) {
-            // 上传完成，移除 Pending 状态
             pendingUploads.remove(hash);
 
-            // 检查元数据是否已存在，防止重复记录日志
-            String existingHash = filenameToHash.get(filename);
-            String existingAddr = hashToStorage.get(hash);
-            
-            boolean metaExists = hash.equals(existingHash);
-            boolean dataExists = address.equals(existingAddr);
+            // 获取或生成 Storage ID
+            storageId = hashToId.computeIfAbsent(hash, k -> UUID.randomUUID().toString());
 
-            if (metaExists && dataExists) {
-                System.out.println("忽略重复元数据提交: " + filename);
-                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, "OK (Dedup)".getBytes(StandardCharsets.UTF_8));
+            // 检查该 Hash 的 ID 是否已经持久化
+            if (persistedHashes.contains(hash)) {
+                System.out.println("忽略重复元数据提交 (ID已持久化): " + filename);
+                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
             // 1. 先持久化
-            metadataManager.logAddFile(filename, hash, address);
+            metadataManager.logAddFile(filename, hash, address, storageId);
 
             // 2. 再更新内存
             filenameToHash.put(filename, hash);
             hashToStorage.put(hash, address);
+            hashToId.put(hash, storageId);
             
-            System.out.println("文件已注册: " + filename);
+            // 标记已持久化
+            persistedHashes.add(hash);
+            
+            System.out.println("文件已注册并持久化: " + filename + ", ID: " + storageId);
         }
         
-        sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, "OK".getBytes(StandardCharsets.UTF_8));
+        sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
     }
 
     private void handleDownloadLocRequest(ChannelHandlerContext ctx, Packet packet) {
