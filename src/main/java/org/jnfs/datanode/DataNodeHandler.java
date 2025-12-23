@@ -13,12 +13,12 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 
 /**
- * DataNode 业务处理器 (原 ServerHandler)
+ * DataNode 业务处理器
  * 处理文件上传和下载的数据流
  */
 public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
-    private static final String STORAGE_PATH = "datanode_files";
+    private final String storagePath;
     
     // 当前正在接收的文件写入通道
     private FileChannel currentFileChannel;
@@ -31,10 +31,14 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     // 已接收字节数
     private long receivedBytes;
 
+    public DataNodeHandler(String storagePath) {
+        this.storagePath = storagePath;
+    }
+
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         System.out.println("客户端(或Driver)已连接: " + ctx.channel().remoteAddress());
-        File storageDir = new File(STORAGE_PATH);
+        File storageDir = new File(storagePath);
         if (!storageDir.exists()) {
             storageDir.mkdirs();
         }
@@ -50,11 +54,10 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     }
 
     private void handlePacket(ChannelHandlerContext ctx, Packet packet) {
-        System.out.println("收到指令: " + packet.getCommandType());
+        // System.out.println("收到指令: " + packet.getCommandType());
         if (packet.getCommandType() == CommandType.UPLOAD_REQUEST) {
             initiateUpload(ctx, packet);
         } else if (packet.getCommandType() == CommandType.DOWNLOAD_REQUEST) {
-            // TODO: 实现下载逻辑
             sendResponse(ctx, CommandType.ERROR, "暂未实现下载".getBytes(StandardCharsets.UTF_8));
         }
     }
@@ -79,7 +82,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             if (currentFos != null) {
                 currentFos.close();
             }
-            File file = new File(STORAGE_PATH, fileName);
+            File file = new File(storagePath, fileName);
             currentFos = new FileOutputStream(file);
             currentFileChannel = currentFos.getChannel();
             currentFileName = fileName;

@@ -10,8 +10,11 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
+import org.jnfs.common.ConfigUtil;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
+
+import java.util.Map;
 
 /**
  * DataNode 服务启动类
@@ -21,19 +24,19 @@ import org.jnfs.common.PacketEncoder;
 public class DataNodeServer {
 
     private final int port;
+    private final String storagePath;
 
-    public DataNodeServer(int port) {
+    public DataNodeServer(int port, String storagePath) {
         this.port = port;
+        this.storagePath = storagePath;
     }
 
     public void run() throws Exception {
         // 1. 线程组优化
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
-        EventLoopGroup workerGroup = new NioEventLoopGroup(); // 默认为 CPU * 2
+        EventLoopGroup workerGroup = new NioEventLoopGroup(); 
         
-        // 2. 业务线程池: 关键！
-        // 文件 I/O (FileChannel.write) 虽然在 NIO 中很快，但在高负载下可能会有阻塞风险
-        // 或者是处理复杂的粘包/大文件写入逻辑，剥离到独立线程池更安全
+        // 2. 业务线程池
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(32);
 
         try {
@@ -45,20 +48,20 @@ public class DataNodeServer {
                  public void initChannel(SocketChannel ch) throws Exception {
                      ch.pipeline().addLast(new PacketDecoder());
                      ch.pipeline().addLast(new PacketEncoder());
-                     // 将 DataNodeHandler 放入业务线程池执行
-                     ch.pipeline().addLast(businessGroup, new DataNodeHandler());
+                     // 将 storagePath 传递给 DataNodeHandler
+                     ch.pipeline().addLast(businessGroup, new DataNodeHandler(storagePath));
                  }
              })
              // 3. TCP 参数调优
-             .option(ChannelOption.SO_BACKLOG, 4096) // DataNode 可能承载更高并发，队列设大
+             .option(ChannelOption.SO_BACKLOG, 4096) 
              .childOption(ChannelOption.SO_KEEPALIVE, true)
              .childOption(ChannelOption.TCP_NODELAY, true)
-             // 增大读写缓冲区，适应大文件传输
-             .childOption(ChannelOption.SO_RCVBUF, 1024 * 1024) // 1MB Recv Buffer
-             .childOption(ChannelOption.SO_SNDBUF, 1024 * 1024); // 1MB Send Buffer
+             .childOption(ChannelOption.SO_RCVBUF, 1024 * 1024) 
+             .childOption(ChannelOption.SO_SNDBUF, 1024 * 1024);
 
             ChannelFuture f = b.bind(port).sync();
             System.out.println("JNFS DataNode 启动成功 (High Concurrency Mode)，端口: " + port);
+            System.out.println("存储目录: " + storagePath);
 
             f.channel().closeFuture().sync();
         } finally {
@@ -68,11 +71,19 @@ public class DataNodeServer {
         }
     }
 
+    @SuppressWarnings("unchecked")
     public static void main(String[] args) throws Exception {
-        int port = 8080;
-        if (args.length > 0) {
-            port = Integer.parseInt(args[0]);
-        }
-        new DataNodeServer(port).run();
+        // 加载配置
+        Map<String, Object> config = ConfigUtil.loadConfig("datanode.yml");
+        
+        // 读取端口
+        Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
+        int port = (int) serverConfig.getOrDefault("port", 8080);
+        
+        // 读取存储路径
+        Map<String, Object> storageConfig = (Map<String, Object>) config.get("storage");
+        String storagePath = (String) storageConfig.getOrDefault("path", "datanode_files");
+        
+        new DataNodeServer(port, storagePath).run();
     }
 }

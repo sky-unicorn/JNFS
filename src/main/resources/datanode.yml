@@ -1,0 +1,6 @@
+server:
+  port: 8080
+
+storage:
+  # 存储路径
+  path: D:/data/jnfs/storage

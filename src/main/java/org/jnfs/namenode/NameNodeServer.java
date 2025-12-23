@@ -10,8 +10,13 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
+import org.jnfs.common.ConfigUtil;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 /**
  * NameNode 服务启动类
@@ -21,20 +26,23 @@ import org.jnfs.common.PacketEncoder;
 public class NameNodeServer {
 
     private final int port;
+    private final List<String> dataNodeList;
 
-    public NameNodeServer(int port) {
+    public NameNodeServer(int port, List<String> dataNodeList) {
         this.port = port;
+        this.dataNodeList = dataNodeList;
     }
 
     public void run() throws Exception {
         // 1. 线程组优化: Boss负责连接，Worker负责IO读写
-        // 默认线程数为 CPU核心数 * 2
-        EventLoopGroup bossGroup = new NioEventLoopGroup(1); // Acceptor 线程通常1个就够
+        EventLoopGroup bossGroup = new NioEventLoopGroup(1); 
         EventLoopGroup workerGroup = new NioEventLoopGroup(); 
         
-        // 2. 业务线程池: 将业务逻辑(含磁盘IO/持久化)从 Netty IO 线程中剥离
-        // 防止元数据写入磁盘时阻塞网络请求
+        // 2. 业务线程池
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(16);
+        
+        // 初始化 Handler 的 DataNodes
+        NameNodeHandler.initDataNodes(dataNodeList);
 
         try {
             ServerBootstrap b = new ServerBootstrap();
@@ -50,9 +58,9 @@ public class NameNodeServer {
                  }
              })
              // 3. TCP 参数调优
-             .option(ChannelOption.SO_BACKLOG, 1024) // 增加半连接/全连接队列大小，防止突发连接拒绝
+             .option(ChannelOption.SO_BACKLOG, 1024) 
              .childOption(ChannelOption.SO_KEEPALIVE, true)
-             .childOption(ChannelOption.TCP_NODELAY, true) // 禁用 Nagle 算法，降低小包延迟
+             .childOption(ChannelOption.TCP_NODELAY, true) 
              .childOption(ChannelOption.SO_RCVBUF, 64 * 1024)
              .childOption(ChannelOption.SO_SNDBUF, 64 * 1024);
 
@@ -67,11 +75,28 @@ public class NameNodeServer {
         }
     }
 
+    @SuppressWarnings("unchecked")
     public static void main(String[] args) throws Exception {
-        int port = 9090; 
-        if (args.length > 0) {
-            port = Integer.parseInt(args[0]);
+        // 加载配置
+        Map<String, Object> config = ConfigUtil.loadConfig("namenode.yml");
+        
+        // 读取端口
+        Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
+        int port = (int) serverConfig.getOrDefault("port", 9090);
+        
+        // 读取 DataNodes 配置
+        List<Map<String, Object>> dataNodesConfig = (List<Map<String, Object>>) config.get("datanodes");
+        List<String> dataNodeList = new ArrayList<>();
+        if (dataNodesConfig != null) {
+            for (Map<String, Object> node : dataNodesConfig) {
+                String host = (String) node.get("host");
+                int nodePort = (int) node.get("port");
+                dataNodeList.add(host + ":" + nodePort);
+            }
         }
-        new NameNodeServer(port).run();
+        
+        System.out.println("加载 DataNodes: " + dataNodeList);
+        
+        new NameNodeServer(port, dataNodeList).run();
     }
 }

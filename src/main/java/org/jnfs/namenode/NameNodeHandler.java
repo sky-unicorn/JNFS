@@ -27,23 +27,27 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     // 元数据持久化管理器
     private static final MetadataManager metadataManager = new MetadataManager();
 
-    // 模拟活跃的 DataNode 列表
+    // 活跃的 DataNode 列表
     private static final List<String> dataNodes = new ArrayList<>();
 
     static {
-        // 硬编码一个 DataNode 用于演示
-        dataNodes.add("localhost:8080");
-        
         // 启动时恢复元数据
         metadataManager.recover(filenameToHash, hashToStorage);
+    }
+
+    /**
+     * 初始化 DataNode 列表 (由 NameNodeServer 启动时调用)
+     */
+    public static void initDataNodes(List<String> nodes) {
+        dataNodes.clear();
+        if (nodes != null) {
+            dataNodes.addAll(nodes);
+        }
     }
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exception {
         CommandType type = packet.getCommandType();
-        // 生产环境高并发下建议降低日志级别或去掉
-        // System.out.println("NameNode 收到请求: " + type);
-
         switch (type) {
             case NAMENODE_CHECK_EXISTENCE:
                 handleCheckExistence(ctx, packet);
@@ -80,6 +84,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             return;
         }
         
+        // 简单负载均衡: 随机选择
         String selectedNode = dataNodes.get(ThreadLocalRandom.current().nextInt(dataNodes.size()));
         sendResponse(ctx, CommandType.NAMENODE_RESPONSE_UPLOAD_LOC, selectedNode.getBytes(StandardCharsets.UTF_8));
     }
