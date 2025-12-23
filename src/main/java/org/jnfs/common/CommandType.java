@@ -26,6 +26,20 @@ public enum CommandType {
     NAMENODE_REQUEST_DOWNLOAD_LOC((byte) 14),
     /** NameNode: 响应下载位置 */
     NAMENODE_RESPONSE_DOWNLOAD_LOC((byte) 15),
+    
+    /** NameNode: 检查文件是否存在 (秒传检查) */
+    NAMENODE_CHECK_EXISTENCE((byte) 20),
+    /** NameNode: 响应文件存在 (支持秒传) */
+    NAMENODE_RESPONSE_EXIST((byte) 21),
+    /** NameNode: 响应文件不存在 (需要上传) */
+    NAMENODE_RESPONSE_NOT_EXIST((byte) 22),
+    
+    /** NameNode: 预上传申请 (并发控制) */
+    NAMENODE_PRE_UPLOAD((byte) 23),
+    /** NameNode: 允许上传 */
+    NAMENODE_RESPONSE_ALLOW((byte) 24),
+    /** NameNode: 正在上传中 (客户端需等待) */
+    NAMENODE_RESPONSE_WAIT((byte) 25),
 
     /** 错误消息 */
     ERROR((byte) -1);
