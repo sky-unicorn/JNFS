@@ -9,6 +9,8 @@ public class Packet {
     private byte version = 1;
     /** 命令类型 */
     private CommandType commandType;
+    /** 安全令牌 */
+    private String token;
     /** 数据体 */
     private byte[] data;
 
@@ -26,6 +28,14 @@ public class Packet {
 
     public void setCommandType(CommandType commandType) {
         this.commandType = commandType;
+    }
+
+    public String getToken() {
+        return token;
+    }
+
+    public void setToken(String token) {
+        this.token = token;
     }
 
     public byte[] getData() {

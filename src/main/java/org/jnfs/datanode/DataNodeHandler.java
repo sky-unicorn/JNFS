@@ -19,6 +19,9 @@ import java.nio.charset.StandardCharsets;
  */
 public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
+    // 预设的安全令牌 (与 NameNode 保持一致)
+    private static final String VALID_TOKEN = "jnfs-secure-token-2025";
+
     private final String storagePath;
     
     // 当前正在接收的文件写入通道
@@ -55,6 +58,14 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     }
 
     private void handlePacket(ChannelHandlerContext ctx, Packet packet) {
+        // 验证 Token (仅针对控制指令)
+        if (!VALID_TOKEN.equals(packet.getToken())) {
+            System.out.println("安全拦截: 无效的 Token");
+            sendResponse(ctx, CommandType.ERROR, "Authentication Failed".getBytes(StandardCharsets.UTF_8));
+            ctx.close();
+            return;
+        }
+
         if (packet.getCommandType() == CommandType.UPLOAD_REQUEST) {
             initiateUpload(ctx, packet);
         } else if (packet.getCommandType() == CommandType.DOWNLOAD_REQUEST) {
@@ -82,8 +93,6 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             if (currentFos != null) {
                 currentFos.close();
             }
-            // 使用文件名(或Hash)作为存储文件名
-            // 实际生产中建议使用Hash作为文件名以避免冲突，这里暂沿用原始文件名或由Driver传入Hash
             File file = new File(storagePath, fileName);
             currentFos = new FileOutputStream(file);
             currentFileChannel = currentFos.getChannel();
@@ -131,10 +140,6 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         receivedBytes = 0;
     }
     
-    /**
-     * 处理下载请求
-     * Payload: filename (目前存储使用的是文件名/Hash)
-     */
     private void handleDownload(ChannelHandlerContext ctx, Packet packet) {
         String filename = new String(packet.getData(), StandardCharsets.UTF_8);
         File file = new File(storagePath, filename);
@@ -146,19 +151,14 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         
         System.out.println("开始发送文件: " + filename);
         
-        // 1. 发送下载响应头 (包含文件大小)
-        // 简单起见，这里直接复用 DOWNLOAD_RESPONSE 返回 "OK"，客户端再接收流
-        // 更严谨的做法是返回 [File Length]
         long fileLength = file.length();
         Packet response = new Packet();
         response.setCommandType(CommandType.DOWNLOAD_RESPONSE);
         response.setData(String.valueOf(fileLength).getBytes(StandardCharsets.UTF_8));
         ctx.write(response);
         
-        // 2. 使用 Zero-Copy 发送文件内容
         DefaultFileRegion region = new DefaultFileRegion(file, 0, fileLength);
         ctx.writeAndFlush(region);
-        // 注意：DataNode 发送完文件后不主动关闭连接，由客户端接收完毕后关闭
     }
 
     private void closeCurrentFile() {

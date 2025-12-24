@@ -20,6 +20,9 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
+    // 预设的安全令牌 (实际应从配置或认证服务加载)
+    private static final String VALID_TOKEN = "jnfs-secure-token-2025";
+
     // 文件名映射: filename -> "hash"
     private static final Map<String, String> filenameToHash = new ConcurrentHashMap<>();
 
@@ -65,6 +68,14 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exception {
+        // 1. 验证 Token
+        if (!validateToken(packet.getToken())) {
+            System.out.println("安全拦截: 无效的 Token - " + ctx.channel().remoteAddress());
+            sendResponse(ctx, CommandType.ERROR, "Authentication Failed: Invalid Token".getBytes(StandardCharsets.UTF_8));
+            // 可以在这里选择 ctx.close() 强制断开，或者仅返回错误
+            return;
+        }
+
         CommandType type = packet.getCommandType();
         switch (type) {
             case NAMENODE_CHECK_EXISTENCE:
@@ -85,6 +96,11 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             default:
                 sendResponse(ctx, CommandType.ERROR, "未知命令".getBytes(StandardCharsets.UTF_8));
         }
+    }
+
+    private boolean validateToken(String token) {
+        // 简单比对，实际可扩展为 JWT 或其他验签逻辑
+        return VALID_TOKEN.equals(token);
     }
 
     private void handleCheckExistence(ChannelHandlerContext ctx, Packet packet) {
@@ -147,27 +163,22 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         synchronized (hashToStorage) {
             pendingUploads.remove(hash);
 
-            // 获取或生成 Storage ID
             storageId = hashToId.computeIfAbsent(hash, k -> UUID.randomUUID().toString());
-            idToHash.put(storageId, hash); // 更新反向索引
+            idToHash.put(storageId, hash); 
 
-            // 检查该 Hash 的 ID 是否已经持久化
             if (persistedHashes.contains(hash)) {
                 System.out.println("忽略重复元数据提交 (ID已持久化): " + filename);
                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
-            // 1. 先持久化
             metadataManager.logAddFile(filename, hash, address, storageId);
 
-            // 2. 再更新内存
             filenameToHash.put(filename, hash);
             hashToStorage.put(hash, address);
             hashToId.put(hash, storageId);
             idToHash.put(storageId, hash);
             
-            // 标记已持久化
             persistedHashes.add(hash);
             
             System.out.println("文件已注册并持久化: " + filename + ", ID: " + storageId);
@@ -176,19 +187,12 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
     }
 
-    /**
-     * 处理下载位置请求 (By Storage ID)
-     * 返回: filename|hash|dataNodeAddr
-     */
     private void handleDownloadLocRequest(ChannelHandlerContext ctx, Packet packet) {
         String storageId = new String(packet.getData(), StandardCharsets.UTF_8);
         String hash = idToHash.get(storageId);
         
         if (hash != null) {
             String address = hashToStorage.get(hash);
-            // 查找任意一个文件名 (由于是基于 Hash 存储，文件名可能不唯一，这里简单反查一个即可)
-            // 实际上对于纯粹的 Blob 存储，文件名可能不重要，或者应该由 NameNode 记录原始文件名
-            // 这里我们遍历 filenameToHash 找到对应的文件名 (性能较低，生产环境应优化索引)
             String filename = "unknown";
             for (Map.Entry<String, String> entry : filenameToHash.entrySet()) {
                 if (entry.getValue().equals(hash)) {
@@ -198,7 +202,6 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             }
 
             if (address != null) {
-                // Payload: filename|hash|address
                 String response = filename + "|" + hash + "|" + address;
                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, response.getBytes(StandardCharsets.UTF_8));
                 return;

@@ -34,10 +34,12 @@ import java.util.concurrent.TimeUnit;
  */
 public class JNFSDriver {
 
+    private static final String CLIENT_TOKEN = "jnfs-secure-token-2025"; // 客户端 Token
+
     private final String nameNodeHost;
     private final int nameNodePort;
     private final EventLoopGroup group;
-    private final String downloadPath; // 默认下载路径
+    private final String downloadPath;
 
     public JNFSDriver(String nameNodeHost, int nameNodePort) {
         this.nameNodeHost = nameNodeHost;
@@ -96,7 +98,6 @@ public class JNFSDriver {
      * @return 下载后的文件对象
      */
     public File downloadFile(String storageId) throws Exception {
-        // 1. 询问 NameNode 获取文件位置
         String locInfo = getDownloadLocation(storageId);
         System.out.println("[Driver] 获取下载信息: " + locInfo);
         
@@ -106,21 +107,18 @@ public class JNFSDriver {
         }
         
         String filename = parts[0];
-        // String hash = parts[1];
         String address = parts[2];
         
         String[] addrParts = address.split(":");
         String dnHost = addrParts[0];
         int dnPort = Integer.parseInt(addrParts[1]);
         
-        // 2. 准备本地下载目录
         File downloadDir = new File(downloadPath);
         if (!downloadDir.exists()) {
             downloadDir.mkdirs();
         }
         File targetFile = new File(downloadDir, filename);
         
-        // 3. 从 DataNode 下载
         downloadFromDataNode(dnHost, dnPort, filename, targetFile);
         System.out.println("[Driver] 文件下载完成: " + targetFile.getAbsolutePath());
         
@@ -141,6 +139,8 @@ public class JNFSDriver {
             } else if (type == CommandType.NAMENODE_RESPONSE_WAIT) {
                 System.out.println("[Driver] 文件正在上传中，等待重试...");
                 Thread.sleep(1000);
+            } else if (type == CommandType.ERROR) {
+                throw new IOException("错误: " + new String(response.getData(), StandardCharsets.UTF_8));
             } else {
                 throw new IOException("预上传申请失败: " + type);
             }
@@ -199,6 +199,7 @@ public class JNFSDriver {
 
         Packet packet = new Packet();
         packet.setCommandType(CommandType.UPLOAD_REQUEST);
+        packet.setToken(CLIENT_TOKEN); // 注入 Token
         packet.setData(metadataBuffer.array());
 
         channel.write(packet);
@@ -221,23 +222,20 @@ public class JNFSDriver {
          .handler(new ChannelInitializer<SocketChannel>() {
              @Override
              protected void initChannel(SocketChannel ch) {
-                 // 下载不需要 Packet 解码器，因为 DataNode 会直接发送文件流 (Header后)
-                 // 但为了复用协议，我们先发一个 Packet 请求
                  ch.pipeline().addLast(new PacketEncoder());
-                 ch.pipeline().addLast(handler); // 自定义 Handler 处理混合流
+                 ch.pipeline().addLast(handler);
              }
          });
 
         ChannelFuture f = b.connect(host, port).sync();
         Channel channel = f.channel();
 
-        // 发送下载请求
         Packet request = new Packet();
         request.setCommandType(CommandType.DOWNLOAD_REQUEST);
+        request.setToken(CLIENT_TOKEN); // 注入 Token
         request.setData(filename.getBytes(StandardCharsets.UTF_8));
         channel.writeAndFlush(request);
 
-        // 等待下载完成
         handler.waitForCompletion();
         channel.close().sync();
     }
@@ -261,6 +259,7 @@ public class JNFSDriver {
 
         Packet packet = new Packet();
         packet.setCommandType(type);
+        packet.setToken(CLIENT_TOKEN); // 注入 Token
         packet.setData(data);
         channel.writeAndFlush(packet);
 
@@ -295,12 +294,6 @@ public class JNFSDriver {
         }
     }
 
-    /**
-     * 专门用于处理下载流的 Handler
-     * 状态机: 
-     * 1. 接收 Packet 头 (DOWNLOAD_RESPONSE + Length)
-     * 2. 接收文件内容 (Raw Bytes)
-     */
     private static class DownloadHandler extends SimpleChannelInboundHandler<ByteBuf> {
         private final File targetFile;
         private FileChannel fileChannel;
@@ -308,8 +301,6 @@ public class JNFSDriver {
         private long fileSize = -1;
         private long receivedBytes = 0;
         private final BlockingQueue<Boolean> completionSignal = new LinkedBlockingQueue<>();
-        
-        // 缓冲区用于暂存 Packet 数据解析
         private ByteBuf tempBuf; 
 
         public DownloadHandler(File targetFile) {
@@ -324,16 +315,26 @@ public class JNFSDriver {
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, ByteBuf msg) throws Exception {
             if (!headerReceived) {
-                // 累积数据直到足以解析 Packet 头
                 tempBuf.writeBytes(msg);
                 
-                // 尝试解析 Packet
-                // Magic(4) + Version(1) + Command(1) + Length(4) = 10 bytes
-                if (tempBuf.readableBytes() >= 10) {
+                if (tempBuf.readableBytes() >= 14) { // Header minimal length
                     tempBuf.markReaderIndex();
-                    int magic = tempBuf.readInt(); // 0xCAFEBABE
+                    int magic = tempBuf.readInt();
                     byte version = tempBuf.readByte();
                     byte command = tempBuf.readByte();
+                    
+                    int tokenLength = tempBuf.readInt();
+                    if (tempBuf.readableBytes() < tokenLength) {
+                        tempBuf.resetReaderIndex();
+                        return;
+                    }
+                    if (tokenLength > 0) tempBuf.skipBytes(tokenLength);
+                    
+                    if (tempBuf.readableBytes() < 4) {
+                        tempBuf.resetReaderIndex();
+                        return;
+                    }
+                    
                     int length = tempBuf.readInt();
                     
                     if (tempBuf.readableBytes() >= length) {
@@ -344,12 +345,10 @@ public class JNFSDriver {
                             throw new IOException("服务端错误: " + new String(data));
                         }
                         
-                        // 解析文件大小
                         String sizeStr = new String(data, StandardCharsets.UTF_8);
                         fileSize = Long.parseLong(sizeStr);
                         headerReceived = true;
                         
-                        // 准备写入文件
                         if (targetFile.exists()) {
                             targetFile.delete();
                         }
@@ -358,7 +357,6 @@ public class JNFSDriver {
                         
                         System.out.println("[Driver] 开始接收文件流，大小: " + fileSize);
 
-                        // 处理 tempBuf 中剩余的字节 (属于文件内容)
                         if (tempBuf.readableBytes() > 0) {
                             writeToFile(tempBuf);
                         }
@@ -367,7 +365,6 @@ public class JNFSDriver {
                     }
                 }
             } else {
-                // 纯文件流模式
                 writeToFile(msg);
             }
         }
@@ -387,7 +384,7 @@ public class JNFSDriver {
         }
 
         public void waitForCompletion() throws InterruptedException {
-            Boolean result = completionSignal.poll(30, TimeUnit.MINUTES); // 大文件可能需要较长时间
+            Boolean result = completionSignal.poll(30, TimeUnit.MINUTES);
             if (result == null) {
                 throw new RuntimeException("下载超时");
             }

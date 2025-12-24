@@ -4,6 +4,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.ByteToMessageDecoder;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
@@ -25,20 +26,20 @@ public class PacketDecoder extends ByteToMessageDecoder {
             if (readable == 0) {
                 return;
             }
-
+            
             // 读取当前可读字节或剩余所需字节的较小值
             int toRead = (int) Math.min(readable, fileBytesToRead);
             // 使用 retain() 增加引用计数，因为 slice 后的 buffer 可能会在后续 handler 中被释放
             ByteBuf chunk = in.readRetainedSlice(toRead);
             out.add(chunk);
-
+            
             fileBytesToRead -= toRead;
             return;
         }
 
         // 2. 普通协议包解码
-        // 校验最小长度: magic(4) + version(1) + command(1) + length(4) = 10 字节
-        if (in.readableBytes() < 10) {
+        // 校验最小长度: magic(4) + version(1) + command(1) + tokenLen(4) + dataLen(4) = 14 字节
+        if (in.readableBytes() < 14) { 
             return;
         }
 
@@ -52,6 +53,27 @@ public class PacketDecoder extends ByteToMessageDecoder {
 
         byte version = in.readByte();
         byte command = in.readByte();
+        
+        // 读取 Token
+        int tokenLength = in.readInt();
+        if (in.readableBytes() < tokenLength) {
+            in.resetReaderIndex();
+            return;
+        }
+        String token = null;
+        if (tokenLength > 0) {
+            byte[] tokenBytes = new byte[tokenLength];
+            in.readBytes(tokenBytes);
+            token = new String(tokenBytes, StandardCharsets.UTF_8);
+        }
+        
+        // 读取 Data
+        // 需再次检查长度，因为上面可能刚读完 token，但 data 还没到
+        if (in.readableBytes() < 4) {
+            in.resetReaderIndex();
+            return;
+        }
+        
         int length = in.readInt();
 
         // 校验数据包完整性
@@ -66,10 +88,11 @@ public class PacketDecoder extends ByteToMessageDecoder {
         Packet packet = new Packet();
         packet.setVersion(version);
         packet.setCommandType(CommandType.fromByte(command));
+        packet.setToken(token);
         packet.setData(data);
 
         out.add(packet);
-
+        
         // 3. 检查是否为文件上传请求，如果是，则解析文件大小并切换到文件流模式
         if (packet.getCommandType() == CommandType.UPLOAD_REQUEST) {
             // UPLOAD_REQUEST 载荷格式: [8字节文件大小] [文件名]

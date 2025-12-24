@@ -4,10 +4,12 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.MessageToByteEncoder;
 
+import java.nio.charset.StandardCharsets;
+
 /**
  * 协议包编码器
  * 将 Packet 对象编码为字节流发送
- * 协议格式: Magic(4) + Version(1) + Command(1) + Length(4) + Data(N)
+ * 协议格式: Magic(4) + Version(1) + Command(1) + TokenLength(4) + Token(M) + Length(4) + Data(N)
  */
 public class PacketEncoder extends MessageToByteEncoder<Packet> {
     private static final int MAGIC_NUMBER = 0xCAFEBABE;
@@ -21,7 +23,17 @@ public class PacketEncoder extends MessageToByteEncoder<Packet> {
         // 3. 写入指令类型 (1字节)
         out.writeByte(msg.getCommandType().getValue());
         
-        // 4. 写入数据长度 (4字节) 和 数据内容
+        // 4. 写入Token (Length + Content)
+        String token = msg.getToken();
+        if (token != null && !token.isEmpty()) {
+            byte[] tokenBytes = token.getBytes(StandardCharsets.UTF_8);
+            out.writeInt(tokenBytes.length);
+            out.writeBytes(tokenBytes);
+        } else {
+            out.writeInt(0);
+        }
+        
+        // 5. 写入数据长度 (4字节) 和 数据内容
         if (msg.getData() != null) {
             out.writeInt(msg.getData().length);
             out.writeBytes(msg.getData());
