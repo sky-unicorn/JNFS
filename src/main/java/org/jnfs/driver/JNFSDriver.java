@@ -17,6 +17,7 @@ import org.jnfs.common.CommandType;
 import org.jnfs.common.Packet;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
+import org.jnfs.common.SecurityUtil;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -34,7 +35,7 @@ import java.util.concurrent.TimeUnit;
  */
 public class JNFSDriver {
 
-    private static final String CLIENT_TOKEN = "jnfs-secure-token-2025"; // 客户端 Token
+    private static final String CLIENT_TOKEN = "jnfs-secure-token-2025"; 
 
     private final String nameNodeHost;
     private final int nameNodePort;
@@ -54,7 +55,8 @@ public class JNFSDriver {
 
     /**
      * 上传文件
-     * @return 存储编号 (Storage ID)
+     * 1. 客户端本地加密
+     * 2. 上传密文到 DataNode
      */
     public String uploadFile(File file) throws Exception {
         if (!file.exists()) {
@@ -74,28 +76,42 @@ public class JNFSDriver {
             return storageId;
         }
 
-        System.out.println("[Driver] 获得上传许可，开始普通上传...");
+        // --- 加密环节 ---
+        System.out.println("[Driver] 正在对文件进行本地加密...");
+        File encryptedFile = new File(file.getParent(), file.getName() + ".enc");
+        SecurityUtil.encryptFile(file, encryptedFile);
+        System.out.println("[Driver] 加密完成，准备上传密文");
 
-        String dataNodeAddr = getDataNodeForUpload();
-        System.out.println("[Driver] 获得上传节点: " + dataNodeAddr);
-        
-        String[] parts = dataNodeAddr.split(":");
-        String dnHost = parts[0];
-        int dnPort = Integer.parseInt(parts[1]);
+        try {
+            System.out.println("[Driver] 获得上传许可，开始上传...");
 
-        uploadToDataNode(dnHost, dnPort, file);
-        System.out.println("[Driver] 文件数据传输完成");
+            String dataNodeAddr = getDataNodeForUpload();
+            System.out.println("[Driver] 获得上传节点: " + dataNodeAddr);
+            
+            String[] parts = dataNodeAddr.split(":");
+            String dnHost = parts[0];
+            int dnPort = Integer.parseInt(parts[1]);
 
-        String storageId = commitFile(file.getName(), fileHash, dataNodeAddr);
-        System.out.println("[Driver] 文件元数据提交完成，存储编号: " + storageId);
-        
-        return storageId;
+            // 上传密文，但使用原始文件的 Hash (用于秒传和校验)
+            uploadToDataNode(dnHost, dnPort, encryptedFile, fileHash);
+            System.out.println("[Driver] 文件数据传输完成");
+
+            String storageId = commitFile(file.getName(), fileHash, dataNodeAddr);
+            System.out.println("[Driver] 文件元数据提交完成，存储编号: " + storageId);
+            
+            return storageId;
+        } finally {
+            // 清理临时密文文件
+            if (encryptedFile.exists()) {
+                encryptedFile.delete();
+            }
+        }
     }
 
     /**
      * 下载文件
-     * @param storageId 存储编号
-     * @return 下载后的文件对象
+     * 1. 下载密文
+     * 2. 本地解密
      */
     public File downloadFile(String storageId) throws Exception {
         String locInfo = getDownloadLocation(storageId);
@@ -107,6 +123,7 @@ public class JNFSDriver {
         }
         
         String filename = parts[0];
+        String hash = parts[1]; // 获取 Hash 用于请求下载
         String address = parts[2];
         
         String[] addrParts = address.split(":");
@@ -117,15 +134,29 @@ public class JNFSDriver {
         if (!downloadDir.exists()) {
             downloadDir.mkdirs();
         }
+        
+        // 先下载到临时密文文件
+        File encryptedFile = new File(downloadDir, filename + ".enc");
         File targetFile = new File(downloadDir, filename);
         
-        downloadFromDataNode(dnHost, dnPort, filename, targetFile);
-        System.out.println("[Driver] 文件下载完成: " + targetFile.getAbsolutePath());
+        // DataNode 存储的是 Hash 命名的文件 (假设 DataNode 已按 Hash 存储)
+        // 或者 DataNode 仍按原名存储? 根据之前的实现是按文件名存储
+        // 这里需要与 DataNode 约定下载标识：现在改为传 Hash 下载
+        downloadFromDataNode(dnHost, dnPort, hash, encryptedFile);
+        System.out.println("[Driver] 密文下载完成: " + encryptedFile.getAbsolutePath());
+        
+        // --- 解密环节 ---
+        System.out.println("[Driver] 正在解密文件...");
+        SecurityUtil.decryptFile(encryptedFile, targetFile);
+        System.out.println("[Driver] 解密完成: " + targetFile.getAbsolutePath());
+        
+        // 清理密文
+        encryptedFile.delete();
         
         return targetFile;
     }
 
-    // --- 内部辅助方法 ---
+    // ... 辅助方法保持不变 ...
 
     private String requestUploadPermission(String hash) throws Exception {
         while (true) {
@@ -174,7 +205,8 @@ public class JNFSDriver {
         return new String(response.getData(), StandardCharsets.UTF_8);
     }
 
-    private void uploadToDataNode(String host, int port, File file) throws Exception {
+    // 修改: uploadToDataNode 接收 Hash 作为存储标识
+    private void uploadToDataNode(String host, int port, File file, String hash) throws Exception {
         Bootstrap b = new Bootstrap();
         SyncHandler handler = new SyncHandler();
         b.group(group)
@@ -192,14 +224,15 @@ public class JNFSDriver {
         Channel channel = f.channel();
 
         long fileSize = file.length();
-        byte[] fileNameBytes = file.getName().getBytes(StandardCharsets.UTF_8);
-        ByteBuffer metadataBuffer = ByteBuffer.allocate(8 + fileNameBytes.length);
+        // 关键修改: 上传时不再传文件名，而是传 Hash，作为 DataNode 的存储文件名
+        byte[] hashBytes = hash.getBytes(StandardCharsets.UTF_8);
+        ByteBuffer metadataBuffer = ByteBuffer.allocate(8 + hashBytes.length);
         metadataBuffer.putLong(fileSize);
-        metadataBuffer.put(fileNameBytes);
+        metadataBuffer.put(hashBytes);
 
         Packet packet = new Packet();
         packet.setCommandType(CommandType.UPLOAD_REQUEST);
-        packet.setToken(CLIENT_TOKEN); // 注入 Token
+        packet.setToken(CLIENT_TOKEN);
         packet.setData(metadataBuffer.array());
 
         channel.write(packet);
@@ -214,7 +247,8 @@ public class JNFSDriver {
         channel.close().sync();
     }
 
-    private void downloadFromDataNode(String host, int port, String filename, File targetFile) throws Exception {
+    // 修改: downloadFromDataNode 请求 Hash
+    private void downloadFromDataNode(String host, int port, String hash, File targetFile) throws Exception {
         Bootstrap b = new Bootstrap();
         DownloadHandler handler = new DownloadHandler(targetFile);
         b.group(group)
@@ -232,8 +266,9 @@ public class JNFSDriver {
 
         Packet request = new Packet();
         request.setCommandType(CommandType.DOWNLOAD_REQUEST);
-        request.setToken(CLIENT_TOKEN); // 注入 Token
-        request.setData(filename.getBytes(StandardCharsets.UTF_8));
+        request.setToken(CLIENT_TOKEN);
+        // 请求 Hash
+        request.setData(hash.getBytes(StandardCharsets.UTF_8));
         channel.writeAndFlush(request);
 
         handler.waitForCompletion();
@@ -259,7 +294,7 @@ public class JNFSDriver {
 
         Packet packet = new Packet();
         packet.setCommandType(type);
-        packet.setToken(CLIENT_TOKEN); // 注入 Token
+        packet.setToken(CLIENT_TOKEN);
         packet.setData(data);
         channel.writeAndFlush(packet);
 
@@ -269,8 +304,8 @@ public class JNFSDriver {
         return response;
     }
 
-    // --- Handlers ---
-
+    // ... Handlers 保持不变 ...
+    
     private static class SyncHandler extends SimpleChannelInboundHandler<Packet> {
         private final BlockingQueue<Packet> queue = new LinkedBlockingQueue<>();
 
@@ -317,7 +352,7 @@ public class JNFSDriver {
             if (!headerReceived) {
                 tempBuf.writeBytes(msg);
                 
-                if (tempBuf.readableBytes() >= 14) { // Header minimal length
+                if (tempBuf.readableBytes() >= 14) { 
                     tempBuf.markReaderIndex();
                     int magic = tempBuf.readInt();
                     byte version = tempBuf.readByte();

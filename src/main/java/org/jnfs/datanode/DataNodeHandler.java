@@ -93,8 +93,10 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             if (currentFos != null) {
                 currentFos.close();
             }
-            File file = new File(storagePath, fileName);
-            currentFos = new FileOutputStream(file);
+            // --- 目录分级逻辑 ---
+            File targetFile = getStorageFile(fileName);
+            
+            currentFos = new FileOutputStream(targetFile);
             currentFileChannel = currentFos.getChannel();
             currentFileName = fileName;
             currentFileSize = fileSize;
@@ -142,7 +144,9 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     
     private void handleDownload(ChannelHandlerContext ctx, Packet packet) {
         String filename = new String(packet.getData(), StandardCharsets.UTF_8);
-        File file = new File(storagePath, filename);
+        
+        // --- 目录分级逻辑 ---
+        File file = getStorageFile(filename);
         
         if (!file.exists()) {
             sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));
@@ -159,6 +163,27 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         
         DefaultFileRegion region = new DefaultFileRegion(file, 0, fileLength);
         ctx.writeAndFlush(region);
+    }
+    
+    /**
+     * 根据 Hash (fileName) 获取存储路径
+     * 规则: 1-2位为一级目录, 3-4位为二级目录
+     */
+    private File getStorageFile(String hash) {
+        // 防止 Hash 过短 (虽然 SHA256 不会，但防御性编程)
+        if (hash == null || hash.length() < 4) {
+            return new File(storagePath, hash);
+        }
+        
+        String dir1 = hash.substring(0, 2);
+        String dir2 = hash.substring(2, 4);
+        
+        File dir = new File(storagePath + File.separator + dir1 + File.separator + dir2);
+        if (!dir.exists()) {
+            dir.mkdirs();
+        }
+        
+        return new File(dir, hash);
     }
 
     private void closeCurrentFile() {
