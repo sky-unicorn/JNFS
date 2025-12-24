@@ -9,7 +9,6 @@ import java.io.IOException;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 元数据管理器
@@ -29,6 +28,7 @@ public class MetadataManager {
      * @param filenameToHash 文件名->Hash 映射
      * @param hashToStorage Hash->存储地址 映射
      * @param hashToId Hash->存储编号 映射
+     * @param idToHash 存储编号->Hash 映射 (新增，用于反向查找)
      * @param persistedHashes 已持久化ID的Hash集合 (用于去重)
      */
     public void recover(Map<String, String> filenameToHash, 
@@ -55,10 +55,9 @@ public class MetadataManager {
 
                     if (parts.length >= 5) {
                         storageId = parts[4];
-                        // 标记该 Hash 的 ID 已经持久化
                         persistedHashes.add(hash);
                     } else {
-                        // 旧数据没有 ID，检查内存中是否已有，没有则生成
+                        // 旧数据兼容
                         storageId = hashToId.computeIfAbsent(hash, k -> UUID.randomUUID().toString());
                     }
 

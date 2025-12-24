@@ -11,7 +11,7 @@ public enum CommandType {
     UPLOAD_RESPONSE((byte) 2),
     /** 下载请求 (To DataNode) */
     DOWNLOAD_REQUEST((byte) 3),
-    /** 下载响应 (From DataNode) */
+    /** 下载响应 (From DataNode - 文件元数据) */
     DOWNLOAD_RESPONSE((byte) 4),
     
     /** NameNode: 请求上传位置 */
@@ -22,9 +22,9 @@ public enum CommandType {
     NAMENODE_COMMIT_FILE((byte) 12),
     /** NameNode: 响应提交结果 */
     NAMENODE_RESPONSE_COMMIT((byte) 13),
-    /** NameNode: 请求下载位置 */
+    /** NameNode: 请求下载位置 (By Storage ID) */
     NAMENODE_REQUEST_DOWNLOAD_LOC((byte) 14),
-    /** NameNode: 响应下载位置 */
+    /** NameNode: 响应下载位置 (包含文件名、Hash、DataNode地址) */
     NAMENODE_RESPONSE_DOWNLOAD_LOC((byte) 15),
     
     /** NameNode: 检查文件是否存在 (秒传检查) */

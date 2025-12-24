@@ -28,9 +28,11 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     // 存储编号索引: hash -> "storageId"
     private static final Map<String, String> hashToId = new ConcurrentHashMap<>();
+    
+    // 反向索引: storageId -> "hash"
+    private static final Map<String, String> idToHash = new ConcurrentHashMap<>();
 
     // 已持久化ID的 Hash 集合 (用于去重)
-    // 仅当 hash 在此集合中时，才视为 ID 已安全落盘，不再写入日志
     private static final Set<String> persistedHashes = ConcurrentHashMap.newKeySet();
 
     // 正在上传中的 Hash 集合 (并发控制)
@@ -43,8 +45,12 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     private static final List<String> dataNodes = new ArrayList<>();
 
     static {
-        // 启动时恢复元数据，并填充 persistedHashes
+        // 启动时恢复元数据
         metadataManager.recover(filenameToHash, hashToStorage, hashToId, persistedHashes);
+        // 重建 idToHash 索引
+        for (Map.Entry<String, String> entry : hashToId.entrySet()) {
+            idToHash.put(entry.getValue(), entry.getKey());
+        }
     }
 
     /**
@@ -143,6 +149,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
             // 获取或生成 Storage ID
             storageId = hashToId.computeIfAbsent(hash, k -> UUID.randomUUID().toString());
+            idToHash.put(storageId, hash); // 更新反向索引
 
             // 检查该 Hash 的 ID 是否已经持久化
             if (persistedHashes.contains(hash)) {
@@ -158,6 +165,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             filenameToHash.put(filename, hash);
             hashToStorage.put(hash, address);
             hashToId.put(hash, storageId);
+            idToHash.put(storageId, hash);
             
             // 标记已持久化
             persistedHashes.add(hash);
@@ -168,14 +176,31 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
     }
 
+    /**
+     * 处理下载位置请求 (By Storage ID)
+     * 返回: filename|hash|dataNodeAddr
+     */
     private void handleDownloadLocRequest(ChannelHandlerContext ctx, Packet packet) {
-        String filename = new String(packet.getData(), StandardCharsets.UTF_8);
-        String hash = filenameToHash.get(filename);
+        String storageId = new String(packet.getData(), StandardCharsets.UTF_8);
+        String hash = idToHash.get(storageId);
         
         if (hash != null) {
             String address = hashToStorage.get(hash);
+            // 查找任意一个文件名 (由于是基于 Hash 存储，文件名可能不唯一，这里简单反查一个即可)
+            // 实际上对于纯粹的 Blob 存储，文件名可能不重要，或者应该由 NameNode 记录原始文件名
+            // 这里我们遍历 filenameToHash 找到对应的文件名 (性能较低，生产环境应优化索引)
+            String filename = "unknown";
+            for (Map.Entry<String, String> entry : filenameToHash.entrySet()) {
+                if (entry.getValue().equals(hash)) {
+                    filename = entry.getKey();
+                    break;
+                }
+            }
+
             if (address != null) {
-                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, address.getBytes(StandardCharsets.UTF_8));
+                // Payload: filename|hash|address
+                String response = filename + "|" + hash + "|" + address;
+                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, response.getBytes(StandardCharsets.UTF_8));
                 return;
             }
         }
