@@ -1,7 +1,7 @@
 server:
   port: 9090
 
-# 配置多个数据节点
-datanodes:
-  - host: localhost
-    port: 8080
+# 注册中心配置
+registry:
+  host: localhost
+  port: 8000

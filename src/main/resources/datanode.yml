@@ -4,3 +4,8 @@ server:
 storage:
   # 存储路径
   path: D:/data/jnfs/storage
+
+# 注册中心配置
+registry:
+  host: localhost
+  port: 8000

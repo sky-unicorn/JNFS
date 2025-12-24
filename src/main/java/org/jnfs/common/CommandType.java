@@ -40,6 +40,18 @@ public enum CommandType {
     NAMENODE_RESPONSE_ALLOW((byte) 24),
     /** NameNode: 正在上传中 (客户端需等待) */
     NAMENODE_RESPONSE_WAIT((byte) 25),
+    
+    // --- 注册中心相关指令 ---
+    /** 服务注册 (To Registry) */
+    REGISTRY_REGISTER((byte) 30),
+    /** 服务注册响应 */
+    REGISTRY_RESPONSE_REGISTER((byte) 31),
+    /** 心跳 (To Registry) */
+    REGISTRY_HEARTBEAT((byte) 32),
+    /** 获取 DataNode 列表 (To Registry) */
+    REGISTRY_GET_DATANODES((byte) 33),
+    /** 响应 DataNode 列表 */
+    REGISTRY_RESPONSE_DATANODES((byte) 34),
 
     /** 错误消息 */
     ERROR((byte) -1);
