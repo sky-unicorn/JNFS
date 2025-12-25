@@ -16,11 +16,15 @@ import java.nio.charset.StandardCharsets;
 /**
  * DataNode 业务处理器
  * 处理文件上传和下载的数据流
+ * 
+ * 升级：支持断点续传/垃圾回收，上传时先写 .tmp 文件
  */
 public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
     // 预设的安全令牌 (与 NameNode 保持一致)
     private static final String VALID_TOKEN = "jnfs-secure-token-2025";
+    // 临时文件后缀
+    public static final String TMP_SUFFIX = ".tmp";
 
     private final String storagePath;
     
@@ -28,8 +32,10 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     private FileChannel currentFileChannel;
     // 当前文件输出流
     private FileOutputStream currentFos;
-    // 当前文件名
+    // 当前文件名 (Hash)
     private String currentFileName;
+    // 当前临时文件对象
+    private File currentTmpFile;
     // 当前文件总大小
     private long currentFileSize;
     // 已接收字节数
@@ -95,10 +101,13 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             }
             // --- 目录分级逻辑 ---
             File targetFile = getStorageFile(fileName);
+            // 上传时先写入 .tmp 临时文件
+            File tmpFile = new File(targetFile.getParentFile(), fileName + TMP_SUFFIX);
             
-            currentFos = new FileOutputStream(targetFile);
+            currentFos = new FileOutputStream(tmpFile);
             currentFileChannel = currentFos.getChannel();
             currentFileName = fileName;
+            currentTmpFile = tmpFile;
             currentFileSize = fileSize;
             receivedBytes = 0;
             
@@ -133,11 +142,22 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
     private void finishUpload(ChannelHandlerContext ctx) {
         closeCurrentFile();
-        System.out.println("文件存储完成: " + currentFileName);
-        sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
+        
+        // 重命名 .tmp -> 正式文件
+        File finalFile = getStorageFile(currentFileName);
+        if (currentTmpFile.renameTo(finalFile)) {
+            System.out.println("文件存储完成: " + currentFileName);
+            sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
+        } else {
+            System.err.println("重命名临时文件失败: " + currentTmpFile.getAbsolutePath());
+            // 尝试手动删除失败的 tmp
+            currentTmpFile.delete(); 
+            sendResponse(ctx, CommandType.ERROR, "文件存储失败(重命名错误)".getBytes(StandardCharsets.UTF_8));
+        }
         
         // 重置状态
         currentFileName = null;
+        currentTmpFile = null;
         currentFileSize = 0;
         receivedBytes = 0;
     }

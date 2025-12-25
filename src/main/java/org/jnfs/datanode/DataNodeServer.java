@@ -22,7 +22,14 @@ import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -33,7 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * DataNode 服务启动类
  * 负责实际的文件存储
  * 
- * 升级：修复心跳连接泄露问题，使用单例连接
+ * 升级：添加后台垃圾回收线程 (GC)
  */
 public class DataNodeServer {
 
@@ -59,6 +66,8 @@ public class DataNodeServer {
     public void run() throws Exception {
         // 启动后台线程负责注册和心跳
         startHeartbeatThread();
+        // 启动垃圾回收线程
+        startGarbageCollectorThread();
 
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
         EventLoopGroup workerGroup = new NioEventLoopGroup(); 
@@ -104,6 +113,47 @@ public class DataNodeServer {
                 System.err.println("发送心跳失败: " + e.getMessage());
             }
         }, 2, 5, TimeUnit.SECONDS);
+    }
+    
+    /**
+     * 垃圾回收线程：定期扫描并删除过期的 .tmp 文件
+     */
+    private void startGarbageCollectorThread() {
+        ScheduledExecutorService gcScheduler = Executors.newSingleThreadScheduledExecutor();
+        // 每 1 小时执行一次 GC (测试时可缩短)
+        gcScheduler.scheduleAtFixedRate(() -> {
+            System.out.println("[GC] 开始执行垃圾回收...");
+            try {
+                cleanupTmpFiles();
+            } catch (Exception e) {
+                System.err.println("[GC] 执行失败: " + e.getMessage());
+            }
+        }, 1, 60, TimeUnit.MINUTES);
+    }
+
+    private void cleanupTmpFiles() throws IOException {
+        Path root = Paths.get(storagePath);
+        if (!Files.exists(root)) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        // 过期时间：1 小时前的临时文件会被删除
+        long expirationTime = 1 * 60 * 60 * 1000L; 
+
+        Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                if (file.toString().endsWith(DataNodeHandler.TMP_SUFFIX)) {
+                    long lastModified = attrs.lastModifiedTime().toMillis();
+                    if (now - lastModified > expirationTime) {
+                        System.out.println("[GC] 删除过期临时文件: " + file);
+                        Files.delete(file);
+                    }
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
     }
 
     private void sendHeartbeatToRegistry() {
