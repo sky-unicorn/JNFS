@@ -7,6 +7,7 @@ import org.jnfs.common.Packet;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,9 +21,9 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     private static final String VALID_TOKEN = "jnfs-secure-token-2025";
 
     // 节点信息内部类
-    private static class NodeInfo {
-        long lastHeartbeatTime;
-        long freeSpace;
+    public static class NodeInfo {
+        public long lastHeartbeatTime;
+        public long freeSpace;
 
         NodeInfo(long lastHeartbeatTime, long freeSpace) {
             this.lastHeartbeatTime = lastHeartbeatTime;
@@ -34,6 +35,13 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     private static final Map<String, NodeInfo> dataNodes = new ConcurrentHashMap<>();
     
     private static final long HEARTBEAT_TIMEOUT = 30 * 1000;
+
+    /**
+     * 暴露给 Dashboard 使用
+     */
+    public static Map<String, NodeInfo> getDataNodes() {
+        return Collections.unmodifiableMap(dataNodes);
+    }
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exception {
@@ -60,8 +68,6 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
     private void handleRegisterOrHeartbeat(ChannelHandlerContext ctx, Packet packet) {
         String payload = new String(packet.getData(), StandardCharsets.UTF_8);
-        // Payload 格式: address|freeSpace (例如: localhost:8080|1024000)
-        // 兼容旧格式 (只包含 address)
         String address;
         long freeSpace = 0;
         
@@ -89,10 +95,8 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         long now = System.currentTimeMillis();
         List<String> activeNodes = new ArrayList<>();
         
-        // 遍历并清理过期节点
         dataNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > HEARTBEAT_TIMEOUT);
         
-        // 构建响应列表，格式: address|freeSpace,address|freeSpace
         for (Map.Entry<String, NodeInfo> entry : dataNodes.entrySet()) {
             activeNodes.add(entry.getKey() + "|" + entry.getValue().freeSpace);
         }

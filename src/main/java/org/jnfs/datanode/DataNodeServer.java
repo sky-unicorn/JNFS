@@ -27,12 +27,13 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * DataNode 服务启动类
  * 负责实际的文件存储
  * 
- * 升级：集成注册中心自动注册与心跳，并上报磁盘剩余空间
+ * 升级：修复心跳连接泄露问题，使用单例连接
  */
 public class DataNodeServer {
 
@@ -42,6 +43,11 @@ public class DataNodeServer {
     private final String storagePath;
     private final String registryHost;
     private final int registryPort;
+
+    // 心跳专用的 EventLoopGroup，避免每次创建销毁
+    private final EventLoopGroup heartbeatGroup = new NioEventLoopGroup(1);
+    private Channel heartbeatChannel;
+    private final AtomicBoolean isConnecting = new AtomicBoolean(false);
 
     public DataNodeServer(int port, String storagePath, String registryHost, int registryPort) {
         this.port = port;
@@ -85,12 +91,12 @@ public class DataNodeServer {
             workerGroup.shutdownGracefully();
             bossGroup.shutdownGracefully();
             businessGroup.shutdownGracefully();
+            heartbeatGroup.shutdownGracefully();
         }
     }
 
     private void startHeartbeatThread() {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        // 初始延迟 2 秒，之后每 5 秒发送一次心跳 (包含注册逻辑)
         scheduler.scheduleAtFixedRate(() -> {
             try {
                 sendHeartbeatToRegistry();
@@ -101,45 +107,63 @@ public class DataNodeServer {
     }
 
     private void sendHeartbeatToRegistry() {
-        EventLoopGroup group = new NioEventLoopGroup();
-        try {
-            Bootstrap b = new Bootstrap();
-            b.group(group)
-             .channel(NioSocketChannel.class)
-             .handler(new ChannelInitializer<SocketChannel>() {
-                 @Override
-                 protected void initChannel(SocketChannel ch) {
-                     ch.pipeline().addLast(new PacketEncoder());
-                 }
-             });
-
-            ChannelFuture f = b.connect(registryHost, registryPort).sync();
-            Channel channel = f.channel();
-
-            // Payload: host:port|freeSpace
-            File storeDir = new File(storagePath);
-            if (!storeDir.exists()) {
-                storeDir.mkdirs();
-            }
-            long freeSpace = storeDir.getFreeSpace();
-            
-            // 实际上应该汇报对外服务的 IP，这里简单使用 localhost
-            // 格式: localhost:8080|10737418240
-            String payload = "localhost:" + port + "|" + freeSpace;
-            
-            Packet packet = new Packet();
-            packet.setCommandType(CommandType.REGISTRY_HEARTBEAT);
-            packet.setToken(VALID_TOKEN);
-            packet.setData(payload.getBytes(StandardCharsets.UTF_8));
-            
-            channel.writeAndFlush(packet);
-            
-            f.channel().closeFuture().sync();
-        } catch (Exception e) {
-            System.err.println("连接注册中心失败: " + e.getMessage());
-        } finally {
-            group.shutdownGracefully();
+        // 如果连接已建立且活跃，直接发送
+        if (heartbeatChannel != null && heartbeatChannel.isActive()) {
+            doSendHeartbeat(heartbeatChannel);
+            return;
         }
+
+        // 如果正在重连中，跳过本次
+        if (isConnecting.get()) {
+            return;
+        }
+
+        isConnecting.set(true);
+        Bootstrap b = new Bootstrap();
+        b.group(heartbeatGroup)
+         .channel(NioSocketChannel.class)
+         .option(ChannelOption.SO_KEEPALIVE, true)
+         .handler(new ChannelInitializer<SocketChannel>() {
+             @Override
+             protected void initChannel(SocketChannel ch) {
+                 ch.pipeline().addLast(new PacketEncoder());
+                 // 简单的 Handler 处理断开重连或响应
+                 ch.pipeline().addLast(new SimpleChannelInboundHandler<Packet>() {
+                    @Override
+                    protected void channelRead0(ChannelHandlerContext ctx, Packet msg) {
+                        // 忽略响应
+                    }
+                 });
+             }
+         });
+
+        b.connect(registryHost, registryPort).addListener((ChannelFuture future) -> {
+            isConnecting.set(false);
+            if (future.isSuccess()) {
+                System.out.println("注册中心连接建立成功");
+                heartbeatChannel = future.channel();
+                doSendHeartbeat(heartbeatChannel);
+            } else {
+                System.err.println("连接注册中心失败: " + future.cause().getMessage());
+            }
+        });
+    }
+
+    private void doSendHeartbeat(Channel channel) {
+        File storeDir = new File(storagePath);
+        if (!storeDir.exists()) {
+            storeDir.mkdirs();
+        }
+        long freeSpace = storeDir.getFreeSpace();
+        
+        String payload = "localhost:" + port + "|" + freeSpace;
+        
+        Packet packet = new Packet();
+        packet.setCommandType(CommandType.REGISTRY_HEARTBEAT);
+        packet.setToken(VALID_TOKEN);
+        packet.setData(payload.getBytes(StandardCharsets.UTF_8));
+        
+        channel.writeAndFlush(packet);
     }
 
     @SuppressWarnings("unchecked")
@@ -152,7 +176,6 @@ public class DataNodeServer {
         Map<String, Object> storageConfig = (Map<String, Object>) config.get("storage");
         String storagePath = (String) storageConfig.getOrDefault("path", "datanode_files");
         
-        // 读取注册中心配置
         String regHost = "localhost";
         int regPort = 8000;
         if (config.containsKey("registry")) {

@@ -14,16 +14,23 @@ import org.jnfs.common.PacketEncoder;
 /**
  * 注册中心服务 (Standalone)
  * 负责 DataNode 的注册、心跳维护，以及向 NameNode 提供服务发现
+ * 
+ * 升级：集成 Dashboard HTTP 服务
  */
 public class RegistryServer {
 
     private final int port;
+    private final int dashboardPort;
 
-    public RegistryServer(int port) {
+    public RegistryServer(int port, int dashboardPort) {
         this.port = port;
+        this.dashboardPort = dashboardPort;
     }
 
     public void run() throws Exception {
+        // 启动 Dashboard (独立线程)
+        new Thread(() -> new DashboardServer(dashboardPort).start()).start();
+
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
         EventLoopGroup workerGroup = new NioEventLoopGroup();
 
@@ -43,7 +50,7 @@ public class RegistryServer {
              .childOption(ChannelOption.SO_KEEPALIVE, true);
 
             ChannelFuture f = b.bind(port).sync();
-            System.out.println("JNFS Registry Center 启动成功，端口: " + port);
+            System.out.println("JNFS Registry Center 启动成功，RPC端口: " + port);
 
             f.channel().closeFuture().sync();
         } finally {
@@ -53,7 +60,8 @@ public class RegistryServer {
     }
 
     public static void main(String[] args) throws Exception {
-        int port = 8000; // 注册中心默认端口
-        new RegistryServer(port).run();
+        int port = 8000; // 注册中心 RPC 端口
+        int dashboardPort = 8081; // Dashboard HTTP 端口
+        new RegistryServer(port, dashboardPort).run();
     }
 }
