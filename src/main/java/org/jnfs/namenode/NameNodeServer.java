@@ -32,7 +32,7 @@ import java.util.concurrent.TimeUnit;
  * NameNode 服务启动类
  * 负责管理元数据和调度 DataNode
  * 
- * 升级：集成注册中心发现机制
+ * 升级：集成注册中心发现机制，并根据配置初始化元数据管理器
  */
 public class NameNodeServer {
 
@@ -136,8 +136,7 @@ public class NameNodeServer {
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 9090);
         
-        // 读取注册中心配置 (假设新增配置项)
-        // 为了兼容旧配置，若未配置则默认 localhost:8000
+        // 读取注册中心配置
         String regHost = "localhost";
         int regPort = 8000;
         if (config.containsKey("registry")) {
@@ -147,6 +146,34 @@ public class NameNodeServer {
         }
         
         System.out.println("使用注册中心: " + regHost + ":" + regPort);
+        
+        // --- 初始化 MetadataManager ---
+        MetadataManager metadataManager = null;
+        if (config.containsKey("metadata")) {
+            Map<String, Object> metaConfig = (Map<String, Object>) config.get("metadata");
+            String mode = (String) metaConfig.getOrDefault("mode", "file");
+            
+            if ("mysql".equalsIgnoreCase(mode)) {
+                System.out.println("使用 MySQL 元数据存储");
+                Map<String, Object> mysqlConfig = (Map<String, Object>) metaConfig.get("mysql");
+                String dbHost = (String) mysqlConfig.getOrDefault("host", "localhost");
+                int dbPort = (int) mysqlConfig.getOrDefault("port", 3306);
+                String dbName = (String) mysqlConfig.getOrDefault("database", "jnfs");
+                String user = (String) mysqlConfig.getOrDefault("user", "root");
+                String password = (String) mysqlConfig.getOrDefault("password", "");
+                
+                metadataManager = new MySQLMetadataManager(dbHost, dbPort, dbName, user, password);
+            } else {
+                System.out.println("使用本地文件元数据存储");
+                metadataManager = new MetadataManager();
+            }
+        } else {
+            System.out.println("默认使用本地文件元数据存储");
+            metadataManager = new MetadataManager();
+        }
+        
+        // 注入到 Handler
+        NameNodeHandler.initMetadataManager(metadataManager);
         
         new NameNodeServer(port, regHost, regPort).run();
     }

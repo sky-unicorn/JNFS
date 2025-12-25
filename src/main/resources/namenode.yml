@@ -5,3 +5,15 @@ server:
 registry:
   host: localhost
   port: 8000
+
+# 元数据存储配置
+metadata:
+  # 模式: file (本地文件) 或 mysql (数据库)
+  mode: file
+  # MySQL 配置 (当 mode: mysql 时生效)
+  mysql:
+    host: 100.10.11.204
+    port: 3306
+    database: jnfs
+    user: jnfs
+    password: jnfs@123

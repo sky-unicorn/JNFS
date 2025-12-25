@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * NameNode 业务处理器
  * 处理客户端的元数据请求
  * 
- * 升级：使用 LoadBalancer 进行带权重的节点选择
+ * 升级：支持动态初始化 MetadataManager
  */
 public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
@@ -29,7 +29,9 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     private static final Map<String, String> idToHash = new ConcurrentHashMap<>();
     private static final Set<String> persistedHashes = ConcurrentHashMap.newKeySet();
     private static final Set<String> pendingUploads = ConcurrentHashMap.newKeySet();
-    private static final MetadataManager metadataManager = new MetadataManager();
+    
+    // 不再 final，不再静态初始化
+    private static MetadataManager metadataManager;
 
     // 活跃的 DataNode 列表 (包含 freeSpace 信息)
     private static final List<String> dataNodes = new ArrayList<>();
@@ -37,8 +39,14 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     // 负载均衡器
     private static final LoadBalancer loadBalancer = new MaxFreeSpaceStrategy();
 
-    static {
+    /**
+     * 初始化元数据管理器 (由 NameNodeServer 启动时调用)
+     */
+    public static void initMetadataManager(MetadataManager manager) {
+        metadataManager = manager;
+        // 恢复元数据
         metadataManager.recover(filenameToHash, hashToStorage, hashToId, persistedHashes);
+        // 重建 idToHash 索引
         for (Map.Entry<String, String> entry : hashToId.entrySet()) {
             idToHash.put(entry.getValue(), entry.getKey());
         }
@@ -161,7 +169,10 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
                 return;
             }
 
-            metadataManager.logAddFile(filename, hash, address, storageId);
+            // 持久化到 MySQL 或 文件
+            if (metadataManager != null) {
+                metadataManager.logAddFile(filename, hash, address, storageId);
+            }
 
             filenameToHash.put(filename, hash);
             hashToStorage.put(hash, address);
