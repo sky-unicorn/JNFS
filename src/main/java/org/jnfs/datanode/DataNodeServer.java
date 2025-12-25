@@ -21,6 +21,7 @@ import org.jnfs.common.Packet;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
 
+import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -31,7 +32,7 @@ import java.util.concurrent.TimeUnit;
  * DataNode 服务启动类
  * 负责实际的文件存储
  * 
- * 升级：集成注册中心自动注册与心跳
+ * 升级：集成注册中心自动注册与心跳，并上报磁盘剩余空间
  */
 public class DataNodeServer {
 
@@ -109,29 +110,32 @@ public class DataNodeServer {
                  @Override
                  protected void initChannel(SocketChannel ch) {
                      ch.pipeline().addLast(new PacketEncoder());
-                     // 简单心跳不需要处理响应，或者可以加一个 DiscardHandler
                  }
              });
 
             ChannelFuture f = b.connect(registryHost, registryPort).sync();
             Channel channel = f.channel();
 
-            // 发送 REGISTER / HEARTBEAT 指令
-            // 简单起见，统一用 REGISTER 或者 HEARTBEAT，Registry 端逻辑类似
-            // Payload: localhost:8080 (自己的地址，实际应自动获取 IP)
-            String myAddress = "localhost:" + port;
+            // Payload: host:port|freeSpace
+            File storeDir = new File(storagePath);
+            if (!storeDir.exists()) {
+                storeDir.mkdirs();
+            }
+            long freeSpace = storeDir.getFreeSpace();
+            
+            // 实际上应该汇报对外服务的 IP，这里简单使用 localhost
+            // 格式: localhost:8080|10737418240
+            String payload = "localhost:" + port + "|" + freeSpace;
             
             Packet packet = new Packet();
             packet.setCommandType(CommandType.REGISTRY_HEARTBEAT);
             packet.setToken(VALID_TOKEN);
-            packet.setData(myAddress.getBytes(StandardCharsets.UTF_8));
+            packet.setData(payload.getBytes(StandardCharsets.UTF_8));
             
             channel.writeAndFlush(packet);
             
-            // 简单等待发送完成即可关闭，不等待响应
             f.channel().closeFuture().sync();
         } catch (Exception e) {
-            // e.printStackTrace();
             System.err.println("连接注册中心失败: " + e.getMessage());
         } finally {
             group.shutdownGracefully();
