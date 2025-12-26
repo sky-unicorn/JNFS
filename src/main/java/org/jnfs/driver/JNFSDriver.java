@@ -252,14 +252,12 @@ public class JNFSDriver {
         long fileSize = file.length();
         // 关键修改: 上传时不再传文件名，而是传 Hash，作为 DataNode 的存储文件名
         byte[] hashBytes = hash.getBytes(StandardCharsets.UTF_8);
-        ByteBuffer metadataBuffer = ByteBuffer.allocate(8 + hashBytes.length);
-        metadataBuffer.putLong(fileSize);
-        metadataBuffer.put(hashBytes);
 
         Packet packet = new Packet();
         packet.setCommandType(CommandType.UPLOAD_REQUEST);
         packet.setToken(CLIENT_TOKEN);
-        packet.setData(metadataBuffer.array());
+        packet.setData(hashBytes);
+        packet.setStreamLength(fileSize);
 
         channel.write(packet);
         channel.write(new DefaultFileRegion(file, 0, fileSize));

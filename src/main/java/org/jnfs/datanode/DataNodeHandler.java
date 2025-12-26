@@ -83,17 +83,14 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
     private void initiateUpload(ChannelHandlerContext ctx, Packet packet) {
         byte[] data = packet.getData();
-        if (data == null || data.length < 8) {
+        if (data == null || data.length == 0) {
             sendResponse(ctx, CommandType.ERROR, "无效的元数据".getBytes(StandardCharsets.UTF_8));
             return;
         }
 
-        long fileSize = 0;
-        for (int i = 0; i < 8; i++) {
-            fileSize = (fileSize << 8) | (data[i] & 0xFF);
-        }
+        long fileSize = packet.getStreamLength();
         
-        String fileName = new String(data, 8, data.length - 8, StandardCharsets.UTF_8);
+        String fileName = new String(data, StandardCharsets.UTF_8);
         
         System.out.println("准备接收文件: " + fileName + ", 大小: " + fileSize + " 字节");
         

@@ -40,5 +40,8 @@ public class PacketEncoder extends MessageToByteEncoder<Packet> {
         } else {
             out.writeInt(0);
         }
+
+        // 6. 写入流数据长度 (8字节)
+        out.writeLong(msg.getStreamLength());
     }
 }

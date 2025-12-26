@@ -38,8 +38,8 @@ public class PacketDecoder extends ByteToMessageDecoder {
         }
 
         // 2. 普通协议包解码
-        // 校验最小长度: magic(4) + version(1) + command(1) + tokenLen(4) + dataLen(4) = 14 字节
-        if (in.readableBytes() < 14) { 
+        // 校验最小长度: magic(4) + version(1) + command(1) + tokenLen(4) + dataLen(4) + streamLen(8) = 22 字节
+        if (in.readableBytes() < 22) { 
             return;
         }
 
@@ -85,26 +85,26 @@ public class PacketDecoder extends ByteToMessageDecoder {
         byte[] data = new byte[length];
         in.readBytes(data);
 
+        // 读取流数据长度
+        if (in.readableBytes() < 8) {
+            in.resetReaderIndex();
+            return;
+        }
+        long streamLength = in.readLong();
+
         Packet packet = new Packet();
         packet.setVersion(version);
         packet.setCommandType(CommandType.fromByte(command));
         packet.setToken(token);
         packet.setData(data);
+        packet.setStreamLength(streamLength);
 
         out.add(packet);
         
-        // 3. 检查是否为文件上传请求，如果是，则解析文件大小并切换到文件流模式
-        if (packet.getCommandType() == CommandType.UPLOAD_REQUEST) {
-            // UPLOAD_REQUEST 载荷格式: [8字节文件大小] [文件名]
-            if (data.length >= 8) {
-                 long fileSize = 0;
-                 // 解析 long 类型的文件大小
-                 for (int i = 0; i < 8; i++) {
-                     fileSize = (fileSize << 8) | (data[i] & 0xFF);
-                 }
-                 // 设置状态，后续字节将作为文件内容直接读取
-                 this.fileBytesToRead = fileSize;
-            }
+        // 3. 检查是否有后续流数据，如果有，则切换到文件流模式
+        if (streamLength > 0) {
+             // 设置状态，后续字节将作为文件内容直接读取
+             this.fileBytesToRead = streamLength;
         }
     }
 }

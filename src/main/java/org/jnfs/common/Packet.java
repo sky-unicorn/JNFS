@@ -13,6 +13,8 @@ public class Packet {
     private String token;
     /** 数据体 */
     private byte[] data;
+    /** 后续流数据长度 (用于文件上传等场景) */
+    private long streamLength = 0;
 
     public byte getVersion() {
         return version;
@@ -44,5 +46,13 @@ public class Packet {
 
     public void setData(byte[] data) {
         this.data = data;
+    }
+
+    public long getStreamLength() {
+        return streamLength;
+    }
+
+    public void setStreamLength(long streamLength) {
+        this.streamLength = streamLength;
     }
 }
