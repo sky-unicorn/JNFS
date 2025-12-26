@@ -376,7 +376,7 @@ public class JNFSDriver {
             if (!headerReceived) {
                 tempBuf.writeBytes(msg);
                 
-                if (tempBuf.readableBytes() >= 14) { 
+                if (tempBuf.readableBytes() >= 22) { // 14(old) + 8(streamLen) = 22
                     tempBuf.markReaderIndex();
                     int magic = tempBuf.readInt();
                     byte version = tempBuf.readByte();
@@ -389,23 +389,35 @@ public class JNFSDriver {
                     }
                     if (tokenLength > 0) tempBuf.skipBytes(tokenLength);
                     
-                    if (tempBuf.readableBytes() < 4) {
+                    if (tempBuf.readableBytes() < 12) { // 4(dataLen) + 8(streamLen)
                         tempBuf.resetReaderIndex();
                         return;
                     }
                     
                     int length = tempBuf.readInt();
                     
-                    if (tempBuf.readableBytes() >= length) {
+                    if (tempBuf.readableBytes() >= length + 8) { // Data + StreamLen
                         byte[] data = new byte[length];
                         tempBuf.readBytes(data);
+                        
+                        long streamLen = tempBuf.readLong();
                         
                         if (command == CommandType.ERROR.getValue()) {
                             throw new IOException("服务端错误: " + new String(data));
                         }
                         
-                        String sizeStr = new String(data, StandardCharsets.UTF_8);
-                        fileSize = Long.parseLong(sizeStr);
+                        // 优先使用 streamLen (如果不为0)，否则回退到解析 Data 字符串
+                        if (streamLen > 0) {
+                            fileSize = streamLen;
+                        } else {
+                            String sizeStr = new String(data, StandardCharsets.UTF_8);
+                            try {
+                                fileSize = Long.parseLong(sizeStr);
+                            } catch (NumberFormatException e) {
+                                fileSize = 0;
+                            }
+                        }
+                        
                         headerReceived = true;
                         
                         if (targetFile.exists()) {

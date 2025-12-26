@@ -216,6 +216,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         Packet response = new Packet();
         response.setCommandType(CommandType.DOWNLOAD_RESPONSE);
         response.setData(String.valueOf(fileLength).getBytes(StandardCharsets.UTF_8));
+        response.setStreamLength(fileLength); // 设置流长度，让 Client 正确跳过 Header
         ctx.write(response);
         
         DefaultFileRegion region = new DefaultFileRegion(file, 0, fileLength);

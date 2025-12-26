@@ -1,5 +1,6 @@
 package org.jnfs.datanode;
 
+import cn.hutool.core.net.NetUtil;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
@@ -47,6 +48,7 @@ public class DataNodeServer {
     private static final String VALID_TOKEN = "jnfs-secure-token-2025";
 
     private final int port;
+    private final String advertisedHost;
     private final String storagePath;
     private final String registryHost;
     private final int registryPort;
@@ -56,8 +58,9 @@ public class DataNodeServer {
     private Channel heartbeatChannel;
     private final AtomicBoolean isConnecting = new AtomicBoolean(false);
 
-    public DataNodeServer(int port, String storagePath, String registryHost, int registryPort) {
+    public DataNodeServer(int port, String advertisedHost, String storagePath, String registryHost, int registryPort) {
         this.port = port;
+        this.advertisedHost = advertisedHost;
         this.storagePath = storagePath;
         this.registryHost = registryHost;
         this.registryPort = registryPort;
@@ -206,7 +209,7 @@ public class DataNodeServer {
         }
         long freeSpace = storeDir.getFreeSpace();
         
-        String payload = "localhost:" + port + "|" + freeSpace;
+        String payload = advertisedHost + ":" + port + "|" + freeSpace;
         
         Packet packet = new Packet();
         packet.setCommandType(CommandType.REGISTRY_HEARTBEAT);
@@ -222,6 +225,7 @@ public class DataNodeServer {
         
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 8080);
+        String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtil.getLocalhostStr());
         
         Map<String, Object> storageConfig = (Map<String, Object>) config.get("storage");
         String storagePath = (String) storageConfig.getOrDefault("path", "datanode_files");
@@ -235,7 +239,8 @@ public class DataNodeServer {
         }
         
         System.out.println("使用注册中心: " + regHost + ":" + regPort);
+        System.out.println("对外广播地址: " + advertisedHost);
         
-        new DataNodeServer(port, storagePath, regHost, regPort).run();
+        new DataNodeServer(port, advertisedHost, storagePath, regHost, regPort).run();
     }
 }
