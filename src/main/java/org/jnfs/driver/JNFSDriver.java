@@ -457,5 +457,13 @@ public class JNFSDriver {
             ctx.close();
             completionSignal.offer(false);
         }
+
+        @Override
+        public void handlerRemoved(ChannelHandlerContext ctx) {
+            if (tempBuf != null && tempBuf.refCnt() > 0) {
+                tempBuf.release();
+                tempBuf = null;
+            }
+        }
     }
 }
