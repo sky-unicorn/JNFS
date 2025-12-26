@@ -144,7 +144,17 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         closeCurrentFile();
         
         // 重命名 .tmp -> 正式文件
-        File finalFile = getStorageFile(currentFileName);
+        File finalFile;
+        try {
+            finalFile = getStorageFile(currentFileName);
+        } catch (IOException e) {
+            e.printStackTrace();
+            // 尝试手动删除失败的 tmp
+            if (currentTmpFile != null) currentTmpFile.delete();
+            sendResponse(ctx, CommandType.ERROR, ("文件存储失败(路径校验错误): " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
+            return;
+        }
+
         if (currentTmpFile.renameTo(finalFile)) {
             System.out.println("文件存储完成: " + currentFileName);
             sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
@@ -166,7 +176,13 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         String filename = new String(packet.getData(), StandardCharsets.UTF_8);
         
         // --- 目录分级逻辑 ---
-        File file = getStorageFile(filename);
+        File file;
+        try {
+            file = getStorageFile(filename);
+        } catch (IOException e) {
+            sendResponse(ctx, CommandType.ERROR, ("非法的文件名: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
+            return;
+        }
         
         if (!file.exists()) {
             sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));
@@ -188,22 +204,45 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     /**
      * 根据 Hash (fileName) 获取存储路径
      * 规则: 1-2位为一级目录, 3-4位为二级目录
+     * 
+     * 安全修复: 增加路径遍历检查和文件名格式校验
      */
-    private File getStorageFile(String hash) {
-        // 防止 Hash 过短 (虽然 SHA256 不会，但防御性编程)
-        if (hash == null || hash.length() < 4) {
-            return new File(storagePath, hash);
+    private File getStorageFile(String hash) throws IOException {
+        if (hash == null || hash.isEmpty()) {
+            throw new IOException("文件名为空");
+        }
+
+        // 1. 严格校验文件名格式 (仅允许字母数字，禁止 .. / \ 等特殊字符)
+        if (!hash.matches("^[a-zA-Z0-9]+$")) {
+            throw new IOException("非法的文件名/Hash检测 (包含非法字符): " + hash);
+        }
+
+        File rootDir = new File(storagePath).getCanonicalFile();
+        
+        // 防止 Hash 过短
+        if (hash.length() < 4) {
+            File target = new File(rootDir, hash);
+            validatePath(target, rootDir);
+            return target;
         }
         
         String dir1 = hash.substring(0, 2);
         String dir2 = hash.substring(2, 4);
         
-        File dir = new File(storagePath + File.separator + dir1 + File.separator + dir2);
+        File dir = new File(rootDir, dir1 + File.separator + dir2);
         if (!dir.exists()) {
             dir.mkdirs();
         }
         
-        return new File(dir, hash);
+        File target = new File(dir, hash);
+        validatePath(target, rootDir);
+        return target;
+    }
+
+    private void validatePath(File target, File rootDir) throws IOException {
+        if (!target.getCanonicalPath().startsWith(rootDir.getPath())) {
+            throw new IOException("路径遍历攻击检测: " + target.getName());
+        }
     }
 
     private void closeCurrentFile() {

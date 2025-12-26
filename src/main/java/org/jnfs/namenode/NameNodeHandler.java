@@ -1,5 +1,7 @@
 package org.jnfs.namenode;
 
+import cn.hutool.cache.CacheUtil;
+import cn.hutool.cache.impl.TimedCache;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
@@ -18,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 处理客户端的元数据请求
  * 
  * 升级：支持动态初始化 MetadataManager
+ * 修复：引入 TimedCache 解决 pendingUploads 死锁问题
  */
 public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
@@ -28,7 +31,16 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     private static final Map<String, String> hashToId = new ConcurrentHashMap<>();
     private static final Map<String, String> idToHash = new ConcurrentHashMap<>();
     private static final Set<String> persistedHashes = ConcurrentHashMap.newKeySet();
-    private static final Set<String> pendingUploads = ConcurrentHashMap.newKeySet();
+    
+    // 使用带过期时间的缓存替代 Set，防止上传意外中断导致的死锁
+    // Key: Hash, Value: Timestamp (虽然Value不重要)
+    // 过期时间设置为 10 分钟 (600,000 ms)
+    private static final TimedCache<String, Boolean> pendingUploads = CacheUtil.newTimedCache(10 * 60 * 1000);
+    
+    static {
+        // 启动定时清理任务，每分钟检查一次过期
+        pendingUploads.schedulePrune(60 * 1000);
+    }
     
     // 不再 final，不再静态初始化
     private static MetadataManager metadataManager;
@@ -115,13 +127,13 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
                 return;
             }
 
-            if (pendingUploads.contains(hash)) {
+            if (pendingUploads.containsKey(hash)) {
                 System.out.println("并发上传冲突，通知等待: Hash=" + hash);
                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_WAIT, "Waiting".getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
-            pendingUploads.add(hash);
+            pendingUploads.put(hash, true);
             System.out.println("允许上传: Hash=" + hash);
             sendResponse(ctx, CommandType.NAMENODE_RESPONSE_ALLOW, "OK".getBytes(StandardCharsets.UTF_8));
         }

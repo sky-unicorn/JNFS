@@ -17,3 +17,4 @@ target/
 .settings
 .springBeans
 .sts4-cache
+out/artifacts/JNFS_jar/JNFS.jar
