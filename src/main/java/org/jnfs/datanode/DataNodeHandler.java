@@ -13,6 +13,8 @@ import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 
+import java.util.UUID;
+
 /**
  * DataNode 业务处理器
  * 处理文件上传和下载的数据流
@@ -101,8 +103,10 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             }
             // --- 目录分级逻辑 ---
             File targetFile = getStorageFile(fileName);
-            // 上传时先写入 .tmp 临时文件
-            File tmpFile = new File(targetFile.getParentFile(), fileName + TMP_SUFFIX);
+            
+            // 修复：使用 UUID 生成唯一临时文件名，防止并发上传同一文件时的数据冲突
+            String uniqueTmpName = fileName + "." + UUID.randomUUID().toString() + TMP_SUFFIX;
+            File tmpFile = new File(targetFile.getParentFile(), uniqueTmpName);
             
             currentFos = new FileOutputStream(tmpFile);
             currentFileChannel = currentFos.getChannel();
@@ -155,14 +159,34 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             return;
         }
 
+        // 如果目标文件已存在，直接删除临时文件并返回成功 (视为幂等上传)
+        if (finalFile.exists()) {
+            System.out.println("文件已存在，跳过重命名: " + currentFileName);
+            currentTmpFile.delete();
+            sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功(秒传): " + currentFileName).getBytes(StandardCharsets.UTF_8));
+            // 重置状态
+            currentFileName = null;
+            currentTmpFile = null;
+            currentFileSize = 0;
+            receivedBytes = 0;
+            return;
+        }
+
         if (currentTmpFile.renameTo(finalFile)) {
             System.out.println("文件存储完成: " + currentFileName);
             sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
         } else {
-            System.err.println("重命名临时文件失败: " + currentTmpFile.getAbsolutePath());
-            // 尝试手动删除失败的 tmp
-            currentTmpFile.delete(); 
-            sendResponse(ctx, CommandType.ERROR, "文件存储失败(重命名错误)".getBytes(StandardCharsets.UTF_8));
+            // 双重检查: 可能在重命名的一瞬间被其他线程抢先了
+            if (finalFile.exists()) {
+                 System.out.println("重命名失败但文件已存在 (并发上传): " + currentFileName);
+                 currentTmpFile.delete();
+                 sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
+            } else {
+                System.err.println("重命名临时文件失败: " + currentTmpFile.getAbsolutePath());
+                // 尝试手动删除失败的 tmp
+                currentTmpFile.delete(); 
+                sendResponse(ctx, CommandType.ERROR, "文件存储失败(重命名错误)".getBytes(StandardCharsets.UTF_8));
+            }
         }
         
         // 重置状态
@@ -267,6 +291,23 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         ctx.writeAndFlush(response);
     }
 
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        closeCurrentFile();
+        if (currentTmpFile != null && currentTmpFile.exists()) {
+            try {
+                currentTmpFile.delete();
+                System.out.println("连接断开，清理未完成临时文件: " + currentTmpFile.getAbsolutePath());
+            } catch (Exception ignore) {
+            }
+        }
+        currentFileName = null;
+        currentTmpFile = null;
+        currentFileSize = 0;
+        receivedBytes = 0;
+        super.channelInactive(ctx);
+    }
+ 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         cause.printStackTrace();
