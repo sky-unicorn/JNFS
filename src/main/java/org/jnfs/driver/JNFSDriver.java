@@ -7,12 +7,18 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.DefaultFileRegion;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.pool.AbstractChannelPoolMap;
+import io.netty.channel.pool.ChannelPoolMap;
+import io.netty.channel.pool.FixedChannelPool;
+import io.netty.channel.pool.SimpleChannelPool;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.util.concurrent.Future;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.Packet;
 import org.jnfs.common.PacketDecoder;
@@ -22,6 +28,7 @@ import org.jnfs.common.SecurityUtil;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
@@ -32,6 +39,8 @@ import java.util.concurrent.TimeUnit;
 /**
  * JNFS Driver (SDK)
  * 提供给客户端应用使用的核心 API
+ * 
+ * 升级：使用 Netty ChannelPool 复用 NameNode 连接
  */
 public class JNFSDriver {
 
@@ -41,12 +50,30 @@ public class JNFSDriver {
     private final int nameNodePort;
     private final EventLoopGroup group;
     private final String downloadPath;
+    
+    // 连接池映射: Address -> Pool
+    private final ChannelPoolMap<InetSocketAddress, SimpleChannelPool> poolMap;
 
     public JNFSDriver(String nameNodeHost, int nameNodePort) {
         this.nameNodeHost = nameNodeHost;
         this.nameNodePort = nameNodePort;
         this.group = new NioEventLoopGroup();
         this.downloadPath = "D:\\data\\jnfs\\download";
+        
+        // 初始化连接池
+        this.poolMap = new AbstractChannelPoolMap<InetSocketAddress, SimpleChannelPool>() {
+            @Override
+            protected SimpleChannelPool newPool(InetSocketAddress key) {
+                Bootstrap b = new Bootstrap()
+                        .group(group)
+                        .channel(NioSocketChannel.class)
+                        .option(ChannelOption.TCP_NODELAY, true)
+                        .option(ChannelOption.SO_KEEPALIVE, true);
+                
+                // 使用 FixedChannelPool 限制最大连接数，防止资源耗尽
+                return new FixedChannelPool(b.remoteAddress(key), new NameNodeChannelPoolHandler(), 10);
+            }
+        };
     }
 
     public void close() {
@@ -156,7 +183,7 @@ public class JNFSDriver {
         return targetFile;
     }
 
-    // ... 辅助方法保持不变 ...
+    // ... 辅助方法 ...
 
     private String requestUploadPermission(String hash) throws Exception {
         while (true) {
@@ -205,7 +232,6 @@ public class JNFSDriver {
         return new String(response.getData(), StandardCharsets.UTF_8);
     }
 
-    // 修改: uploadToDataNode 接收 Hash 作为存储标识
     private void uploadToDataNode(String host, int port, File file, String hash) throws Exception {
         Bootstrap b = new Bootstrap();
         SyncHandler handler = new SyncHandler();
@@ -247,7 +273,6 @@ public class JNFSDriver {
         channel.close().sync();
     }
 
-    // 修改: downloadFromDataNode 请求 Hash
     private void downloadFromDataNode(String host, int port, String hash, File targetFile) throws Exception {
         Bootstrap b = new Bootstrap();
         DownloadHandler handler = new DownloadHandler(targetFile);
@@ -267,7 +292,6 @@ public class JNFSDriver {
         Packet request = new Packet();
         request.setCommandType(CommandType.DOWNLOAD_REQUEST);
         request.setToken(CLIENT_TOKEN);
-        // 请求 Hash
         request.setData(hash.getBytes(StandardCharsets.UTF_8));
         channel.writeAndFlush(request);
 
@@ -275,36 +299,38 @@ public class JNFSDriver {
         channel.close().sync();
     }
 
+    // --- 使用连接池发送请求 ---
     private Packet sendRequestToNameNode(CommandType type, byte[] data) throws Exception {
-        Bootstrap b = new Bootstrap();
+        InetSocketAddress address = new InetSocketAddress(nameNodeHost, nameNodePort);
+        SimpleChannelPool pool = poolMap.get(address);
+        
+        Future<Channel> future = pool.acquire();
+        Channel channel = future.sync().getNow(); // 阻塞获取连接
+        
         SyncHandler handler = new SyncHandler();
-        b.group(group)
-         .channel(NioSocketChannel.class)
-         .handler(new ChannelInitializer<SocketChannel>() {
-             @Override
-             protected void initChannel(SocketChannel ch) {
-                 ch.pipeline().addLast(new PacketDecoder());
-                 ch.pipeline().addLast(new PacketEncoder());
-                 ch.pipeline().addLast(handler);
-             }
-         });
-
-        ChannelFuture f = b.connect(nameNodeHost, nameNodePort).sync();
-        Channel channel = f.channel();
-
-        Packet packet = new Packet();
-        packet.setCommandType(type);
-        packet.setToken(CLIENT_TOKEN);
-        packet.setData(data);
-        channel.writeAndFlush(packet);
-
-        Packet response = handler.getResponse();
-        channel.close().sync();
-
-        return response;
+        try {
+            // 动态添加业务 Handler
+            channel.pipeline().addLast("syncHandler", handler);
+            
+            Packet packet = new Packet();
+            packet.setCommandType(type);
+            packet.setToken(CLIENT_TOKEN);
+            packet.setData(data);
+            
+            channel.writeAndFlush(packet);
+            
+            // 等待响应
+            return handler.getResponse();
+        } finally {
+            // 清理 Handler 并释放连接回池
+            if (channel.pipeline().get("syncHandler") != null) {
+                channel.pipeline().remove("syncHandler");
+            }
+            pool.release(channel);
+        }
     }
 
-    // ... Handlers 保持不变 ...
+    // ... Handlers ...
     
     private static class SyncHandler extends SimpleChannelInboundHandler<Packet> {
         private final BlockingQueue<Packet> queue = new LinkedBlockingQueue<>();
