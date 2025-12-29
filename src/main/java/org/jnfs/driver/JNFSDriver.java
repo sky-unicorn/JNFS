@@ -273,12 +273,14 @@ public class JNFSDriver {
 
     private void downloadFromDataNode(String host, int port, String hash, File targetFile) throws Exception {
         Bootstrap b = new Bootstrap();
+        // 使用 PacketDecoder 复用协议解析逻辑
         DownloadHandler handler = new DownloadHandler(targetFile);
         b.group(group)
          .channel(NioSocketChannel.class)
          .handler(new ChannelInitializer<SocketChannel>() {
              @Override
              protected void initChannel(SocketChannel ch) {
+                 ch.pipeline().addLast(new PacketDecoder()); // 复用标准 Decoder
                  ch.pipeline().addLast(new PacketEncoder());
                  ch.pipeline().addLast(handler);
              }
@@ -353,127 +355,88 @@ public class JNFSDriver {
         }
     }
 
-    private static class DownloadHandler extends SimpleChannelInboundHandler<ByteBuf> {
+    private static class DownloadHandler extends SimpleChannelInboundHandler<Object> {
         private final File targetFile;
         private FileChannel fileChannel;
-        private boolean headerReceived = false;
         private long fileSize = -1;
         private long receivedBytes = 0;
         private final BlockingQueue<Boolean> completionSignal = new LinkedBlockingQueue<>();
-        private ByteBuf tempBuf; 
 
         public DownloadHandler(File targetFile) {
             this.targetFile = targetFile;
         }
 
         @Override
-        public void channelActive(ChannelHandlerContext ctx) {
-            tempBuf = ctx.alloc().buffer();
-        }
-
-        @Override
-        protected void channelRead0(ChannelHandlerContext ctx, ByteBuf msg) throws Exception {
-            if (!headerReceived) {
-                tempBuf.writeBytes(msg);
+        protected void channelRead0(ChannelHandlerContext ctx, Object msg) throws Exception {
+            if (msg instanceof Packet) {
+                // 处理协议包 (DOWNLOAD_RESPONSE)
+                Packet packet = (Packet) msg;
+                if (packet.getCommandType() == CommandType.ERROR) {
+                    throw new IOException("服务端错误: " + new String(packet.getData()));
+                }
                 
-                if (tempBuf.readableBytes() >= 22) { // 14(old) + 8(streamLen) = 22
-                    tempBuf.markReaderIndex();
-                    int magic = tempBuf.readInt();
-                    byte version = tempBuf.readByte();
-                    byte command = tempBuf.readByte();
-                    
-                    int tokenLength = tempBuf.readInt();
-                    if (tempBuf.readableBytes() < tokenLength) {
-                        tempBuf.resetReaderIndex();
-                        return;
-                    }
-                    if (tokenLength > 0) tempBuf.skipBytes(tokenLength);
-                    
-                    if (tempBuf.readableBytes() < 12) { // 4(dataLen) + 8(streamLen)
-                        tempBuf.resetReaderIndex();
-                        return;
-                    }
-                    
-                    int length = tempBuf.readInt();
-                    
-                    if (tempBuf.readableBytes() >= length + 8) { // Data + StreamLen
-                        byte[] data = new byte[length];
-                        tempBuf.readBytes(data);
-                        
-                        long streamLen = tempBuf.readLong();
-                        
-                        if (command == CommandType.ERROR.getValue()) {
-                            throw new IOException("服务端错误: " + new String(data));
-                        }
-                        
-                        // 优先使用 streamLen (如果不为0)，否则回退到解析 Data 字符串
-                        if (streamLen > 0) {
-                            fileSize = streamLen;
-                        } else {
-                            String sizeStr = new String(data, StandardCharsets.UTF_8);
-                            try {
-                                fileSize = Long.parseLong(sizeStr);
-                            } catch (NumberFormatException e) {
-                                fileSize = 0;
-                            }
-                        }
-                        
-                        headerReceived = true;
-                        
-                        if (targetFile.exists()) {
-                            targetFile.delete();
-                        }
-                        FileOutputStream fos = new FileOutputStream(targetFile);
-                        fileChannel = fos.getChannel();
-                        
-                        System.out.println("[Driver] 开始接收文件流，大小: " + fileSize);
-
-                        if (tempBuf.readableBytes() > 0) {
-                            writeToFile(tempBuf);
-                        }
-                    } else {
-                        tempBuf.resetReaderIndex();
+                // 获取文件大小
+                long streamLen = packet.getStreamLength();
+                if (streamLen > 0) {
+                    fileSize = streamLen;
+                } else {
+                    try {
+                        String sizeStr = new String(packet.getData(), StandardCharsets.UTF_8);
+                        fileSize = Long.parseLong(sizeStr);
+                    } catch (NumberFormatException e) {
+                        fileSize = 0;
                     }
                 }
-            } else {
-                writeToFile(msg);
-            }
-        }
-
-        private void writeToFile(ByteBuf buf) throws IOException {
-            if (fileChannel != null) {
-                int readable = buf.readableBytes();
-                buf.readBytes(fileChannel, receivedBytes, readable);
-                receivedBytes += readable;
                 
-                if (receivedBytes >= fileSize) {
-                    System.out.println("[Driver] 下载完成");
-                    fileChannel.close();
-                    completionSignal.offer(true);
+                // 准备接收文件
+                if (targetFile.exists()) {
+                    targetFile.delete();
+                }
+                FileOutputStream fos = new FileOutputStream(targetFile);
+                fileChannel = fos.getChannel();
+                System.out.println("[Driver] 开始接收文件流，大小: " + fileSize);
+                
+            } else if (msg instanceof ByteBuf) {
+                // 处理文件流数据
+                ByteBuf buf = (ByteBuf) msg;
+                if (fileChannel != null) {
+                    int readable = buf.readableBytes();
+                    buf.readBytes(fileChannel, receivedBytes, readable);
+                    receivedBytes += readable;
+                    
+                    if (receivedBytes >= fileSize) {
+                        System.out.println("[Driver] 下载完成");
+                        closeFile();
+                        completionSignal.offer(true);
+                    }
                 }
             }
+        }
+        
+        private void closeFile() {
+             if (fileChannel != null) {
+                 try {
+                     fileChannel.close();
+                 } catch (IOException e) {
+                     e.printStackTrace();
+                 }
+                 fileChannel = null;
+             }
         }
 
         public void waitForCompletion() throws InterruptedException {
             Boolean result = completionSignal.poll(30, TimeUnit.MINUTES);
-            if (result == null) {
-                throw new RuntimeException("下载超时");
+            if (result == null || !result) {
+                throw new RuntimeException("下载超时或失败");
             }
         }
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             cause.printStackTrace();
+            closeFile();
             ctx.close();
             completionSignal.offer(false);
-        }
-
-        @Override
-        public void handlerRemoved(ChannelHandlerContext ctx) {
-            if (tempBuf != null && tempBuf.refCnt() > 0) {
-                tempBuf.release();
-                tempBuf = null;
-            }
         }
     }
 }
