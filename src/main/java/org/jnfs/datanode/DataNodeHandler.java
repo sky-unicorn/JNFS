@@ -140,9 +140,12 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         }
     }
 
+    // 文件锁对象，用于同步文件操作
+    private static final Object FILE_LOCK = new Object();
+
     private void finishUpload(ChannelHandlerContext ctx) {
         closeCurrentFile();
-
+        
         // 重命名 .tmp -> 正式文件
         File finalFile;
         try {
@@ -155,37 +158,40 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             return;
         }
 
-        // 如果目标文件已存在，直接删除临时文件并返回成功 (视为幂等上传)
-        if (finalFile.exists()) {
-            System.out.println("文件已存在，跳过重命名: " + currentFileName);
-            currentTmpFile.delete();
-            sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功(秒传): " + currentFileName).getBytes(StandardCharsets.UTF_8));
-            // 重置状态
-            currentFileName = null;
-            currentTmpFile = null;
-            currentFileSize = 0;
-            receivedBytes = 0;
-            return;
-        }
-
-        if (currentTmpFile.renameTo(finalFile)) {
-            System.out.println("文件存储完成: " + currentFileName);
-            sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
-        } else {
-            // 双重检查: 可能在重命名的一瞬间被其他线程抢先了
+        // 引入文件锁，确保存在性检查和重命名操作的原子性
+        synchronized (FILE_LOCK) {
+            // 如果目标文件已存在，直接删除临时文件并返回成功 (视为幂等上传)
             if (finalFile.exists()) {
-                 System.out.println("重命名失败但文件已存在 (并发上传): " + currentFileName);
-                 currentTmpFile.delete();
-                 sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
-            } else {
-                System.err.println("重命名临时文件失败: " + currentTmpFile.getAbsolutePath());
-                // 尝试手动删除失败的 tmp
+                System.out.println("文件已存在，跳过重命名: " + currentFileName);
                 currentTmpFile.delete();
-                sendResponse(ctx, CommandType.ERROR, "文件存储失败(重命名错误)".getBytes(StandardCharsets.UTF_8));
+                sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功(秒传): " + currentFileName).getBytes(StandardCharsets.UTF_8));
+                // 重置状态
+                resetState();
+                return;
+            }
+
+            if (currentTmpFile.renameTo(finalFile)) {
+                System.out.println("文件存储完成: " + currentFileName);
+                sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
+            } else {
+                // 双重检查: 可能在重命名的一瞬间被其他线程抢先了 (虽然有 FILE_LOCK，但防御性编程)
+                if (finalFile.exists()) {
+                     System.out.println("重命名失败但文件已存在 (并发上传): " + currentFileName);
+                     currentTmpFile.delete();
+                     sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
+                } else {
+                    System.err.println("重命名临时文件失败: " + currentTmpFile.getAbsolutePath());
+                    // 尝试手动删除失败的 tmp
+                    currentTmpFile.delete(); 
+                    sendResponse(ctx, CommandType.ERROR, "文件存储失败(重命名错误)".getBytes(StandardCharsets.UTF_8));
+                }
             }
         }
-
-        // 重置状态
+        
+        resetState();
+    }
+    
+    private void resetState() {
         currentFileName = null;
         currentTmpFile = null;
         currentFileSize = 0;
