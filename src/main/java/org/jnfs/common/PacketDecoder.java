@@ -14,6 +14,10 @@ import java.util.List;
  */
 public class PacketDecoder extends ByteToMessageDecoder {
     private static final int MAGIC_NUMBER = 0xCAFEBABE;
+    // 最大允许的 Token 长度 (4KB)
+    private static final int MAX_TOKEN_LENGTH = 4096;
+    // 最大允许的 Data 长度 (16MB) - 防止 OOM 攻击
+    private static final int MAX_DATA_LENGTH = 16 * 1024 * 1024;
 
     // 文件流传输状态管理：记录剩余需要读取的文件字节数
     private long fileBytesToRead = 0;
@@ -56,6 +60,12 @@ public class PacketDecoder extends ByteToMessageDecoder {
         
         // 读取 Token
         int tokenLength = in.readInt();
+        
+        // 安全校验: Token 长度
+        if (tokenLength < 0 || tokenLength > MAX_TOKEN_LENGTH) {
+            throw new IllegalArgumentException("非法 Token 长度: " + tokenLength);
+        }
+        
         if (in.readableBytes() < tokenLength) {
             in.resetReaderIndex();
             return;
@@ -75,6 +85,11 @@ public class PacketDecoder extends ByteToMessageDecoder {
         }
         
         int length = in.readInt();
+
+        // 安全校验: Data 长度
+        if (length < 0 || length > MAX_DATA_LENGTH) {
+            throw new IllegalArgumentException("非法数据包长度: " + length);
+        }
 
         // 校验数据包完整性
         if (in.readableBytes() < length) {
