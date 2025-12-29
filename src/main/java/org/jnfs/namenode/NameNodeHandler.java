@@ -51,6 +51,21 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     // 负载均衡器
     private static final LoadBalancer loadBalancer = new MaxFreeSpaceStrategy();
 
+    // 锁分段数组，用于减小锁粒度 (128个分段锁)
+    private static final Object[] SEGMENT_LOCKS = new Object[128];
+    static {
+        for (int i = 0; i < SEGMENT_LOCKS.length; i++) {
+            SEGMENT_LOCKS[i] = new Object();
+        }
+    }
+
+    /**
+     * 获取分段锁
+     */
+    private Object getLock(String key) {
+        return SEGMENT_LOCKS[Math.abs(key.hashCode() % SEGMENT_LOCKS.length)];
+    }
+
     /**
      * 初始化元数据管理器 (由 NameNodeServer 启动时调用)
      */
@@ -120,7 +135,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     private void handlePreUpload(ChannelHandlerContext ctx, Packet packet) {
         String hash = new String(packet.getData(), StandardCharsets.UTF_8);
         
-        synchronized (hashToStorage) {
+        synchronized (getLock(hash)) {
             String storageAddr = hashToStorage.get(hash);
             if (storageAddr != null) {
                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, storageAddr.getBytes(StandardCharsets.UTF_8));
@@ -168,18 +183,31 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         String hash = parts[1];
         String address = parts[2];
         String storageId;
+        
+        // 1. 快速检查：如果已存在，直接返回
+        if (persistedHashes.contains(hash)) {
+             storageId = hashToId.get(hash);
+             if (storageId != null) {
+                 System.out.println("忽略重复元数据提交 (ID已持久化): " + filename);
+                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
+                 return;
+             }
+        }
 
-        synchronized (hashToStorage) {
+        synchronized (getLock(hash)) {
+            // 双重检查
+            if (persistedHashes.contains(hash)) {
+                 storageId = hashToId.get(hash);
+                 if (storageId != null) {
+                     sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
+                     return;
+                 }
+            }
+            
             pendingUploads.remove(hash);
 
             storageId = hashToId.computeIfAbsent(hash, k -> UUID.randomUUID().toString());
             idToHash.put(storageId, hash); 
-
-            if (persistedHashes.contains(hash)) {
-                System.out.println("忽略重复元数据提交 (ID已持久化): " + filename);
-                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
-                return;
-            }
 
             // 持久化到 MySQL 或 文件
             if (metadataManager != null) {
