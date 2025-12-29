@@ -11,10 +11,15 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 注册中心业务处理器
  * 维护服务列表和心跳
+ * 
+ * 修复：增加主动清理过期节点的定时任务，防止被动过期导致的内存泄漏
  */
 public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
@@ -35,6 +40,30 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     private static final Map<String, NodeInfo> dataNodes = new ConcurrentHashMap<>();
     
     private static final long HEARTBEAT_TIMEOUT = 30 * 1000;
+
+    // 主动清理过期节点的定时任务
+    private static final ScheduledExecutorService cleanerExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "Registry-Cleaner");
+        t.setDaemon(true); // 设置为守护线程，随JVM退出
+        return t;
+    });
+
+    static {
+        // 每 10 秒执行一次清理检查
+        cleanerExecutor.scheduleAtFixedRate(() -> {
+            try {
+                long now = System.currentTimeMillis();
+                int initialSize = dataNodes.size();
+                dataNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > HEARTBEAT_TIMEOUT);
+                int finalSize = dataNodes.size();
+                if (initialSize != finalSize) {
+                    System.out.println("[Registry-Cleaner] 清理了 " + (initialSize - finalSize) + " 个过期节点");
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }, 10, 10, TimeUnit.SECONDS);
+    }
 
     /**
      * 暴露给 Dashboard 使用
