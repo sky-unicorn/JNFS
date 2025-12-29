@@ -291,28 +291,41 @@ public class JNFSDriver {
     private Packet sendRequestToNameNode(CommandType type, byte[] data) throws Exception {
         InetSocketAddress address = new InetSocketAddress(nameNodeHost, nameNodePort);
         SimpleChannelPool pool = poolMap.get(address);
-
+        
         Future<Channel> future = pool.acquire();
         Channel channel = future.sync().getNow(); // 阻塞获取连接
-
+        
         SyncHandler handler = new SyncHandler();
         try {
+            // 防御性清理：确保 Pipeline 中没有残留的 syncHandler
+            // (虽然 finally 中有清理，但为了防止上一次 release 时的意外情况，这里再次检查)
+            if (channel.pipeline().get("syncHandler") != null) {
+                channel.pipeline().remove("syncHandler");
+            }
+
             // 动态添加业务 Handler
             channel.pipeline().addLast("syncHandler", handler);
-
+            
             Packet packet = new Packet();
             packet.setCommandType(type);
             packet.setToken(CLIENT_TOKEN);
             packet.setData(data);
-
+            
             channel.writeAndFlush(packet);
-
+            
             // 等待响应
             return handler.getResponse();
         } finally {
             // 清理 Handler 并释放连接回池
-            if (channel.pipeline().get("syncHandler") != null) {
-                channel.pipeline().remove("syncHandler");
+            // 使用 try-catch 确保即使 remove 抛出异常 (极少见)，也能释放连接
+            try {
+                if (channel.pipeline().get("syncHandler") != null) {
+                    channel.pipeline().remove("syncHandler");
+                }
+            } catch (Exception e) {
+                System.err.println("移除 Handler 失败: " + e.getMessage());
+                // 此时连接可能已污染，考虑关闭它而不是放回池中?
+                // 目前 SimpleChannelPool 没有直接销毁接口，但 release 会处理
             }
             pool.release(channel);
         }
