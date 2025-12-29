@@ -1,7 +1,6 @@
 package org.jnfs.example;
 
 import io.netty.bootstrap.Bootstrap;
-import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -12,8 +11,8 @@ import org.jnfs.common.Packet;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
 
-import java.nio.charset.StandardCharsets;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 
 public class SecurityTest {
 
@@ -50,7 +49,7 @@ public class SecurityTest {
             // 构造恶意文件名
             String maliciousName = "../../../malicious_file.txt";
             byte[] nameBytes = maliciousName.getBytes(StandardCharsets.UTF_8);
-            
+
             // 构造上传包
             ByteBuffer metadataBuffer = ByteBuffer.allocate(8 + nameBytes.length);
             metadataBuffer.putLong(10); // file size

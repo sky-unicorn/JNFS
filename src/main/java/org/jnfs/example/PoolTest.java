@@ -4,7 +4,6 @@ import org.jnfs.driver.JNFSDriver;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -24,12 +23,12 @@ public class PoolTest {
         }
 
         JNFSDriver driver = new JNFSDriver("localhost", 9090);
-        
+
         int threads = 5;
         int requestsPerThread = 4;
-        
+
         ExecutorService executor = Executors.newFixedThreadPool(threads);
-        
+
         System.out.println("开始并发测试: " + (threads * requestsPerThread) + " 次请求");
         long start = System.currentTimeMillis();
 
@@ -50,10 +49,10 @@ public class PoolTest {
 
         executor.shutdown();
         executor.awaitTermination(1, TimeUnit.MINUTES);
-        
+
         long end = System.currentTimeMillis();
         System.out.println("测试结束，耗时: " + (end - start) + "ms");
-        
+
         driver.close();
         testFile.delete();
     }

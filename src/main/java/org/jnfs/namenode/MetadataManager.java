@@ -1,11 +1,6 @@
 package org.jnfs.namenode;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
+import java.io.*;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -31,7 +26,7 @@ public class MetadataManager {
      * @param idToHash 存储编号->Hash 映射 (新增，用于反向查找)
      * @param persistedHashes 已持久化ID的Hash集合 (用于去重)
      */
-    public void recover(Map<String, String> filenameToHash, 
+    public void recover(Map<String, String> filenameToHash,
                         Map<String, String> hashToStorage,
                         Map<String, String> hashToId,
                         Set<String> persistedHashes) {
@@ -79,11 +74,11 @@ public class MetadataManager {
      */
     public synchronized void logAddFile(String filename, String hash, String address, String storageId) {
         String record = String.format("ADD|%s|%s|%s|%s", filename, hash, address, storageId);
-        
+
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(logFile, true))) {
             writer.write(record);
             writer.newLine();
-            writer.flush(); 
+            writer.flush();
         } catch (IOException e) {
             e.printStackTrace();
             System.err.println("[MetadataManager] 写入元数据日志失败: " + e.getMessage());

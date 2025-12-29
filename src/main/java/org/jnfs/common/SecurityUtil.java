@@ -2,13 +2,8 @@ package org.jnfs.common;
 
 import cn.hutool.crypto.SecureUtil;
 import cn.hutool.crypto.symmetric.AES;
-import cn.hutool.crypto.symmetric.SymmetricAlgorithm;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.*;
 
 /**
  * 加密工具类
@@ -18,7 +13,7 @@ public class SecurityUtil {
 
     // 默认密钥 (16字节 = 128位)，实际生产中应从安全配置中心获取或由用户提供
     private static final byte[] DEFAULT_KEY = "jnfs-secret-key!".getBytes();
-    
+
     private static final AES aes = SecureUtil.aes(DEFAULT_KEY);
 
     /**

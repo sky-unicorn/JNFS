@@ -2,24 +2,14 @@ package org.jnfs.namenode;
 
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelOption;
-import io.netty.channel.EventLoopGroup;
-import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
-import org.jnfs.common.CommandType;
-import org.jnfs.common.ConfigUtil;
-import org.jnfs.common.Packet;
-import org.jnfs.common.PacketDecoder;
-import org.jnfs.common.PacketEncoder;
+import org.jnfs.common.*;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -31,7 +21,7 @@ import java.util.concurrent.TimeUnit;
 /**
  * NameNode 服务启动类
  * 负责管理元数据和调度 DataNode
- * 
+ *
  * 升级：集成注册中心发现机制，并根据配置初始化元数据管理器
  */
 public class NameNodeServer {
@@ -52,10 +42,10 @@ public class NameNodeServer {
         // 启动后台线程定期从注册中心拉取 DataNode 列表
         startDiscoveryThread();
 
-        EventLoopGroup bossGroup = new NioEventLoopGroup(1); 
-        EventLoopGroup workerGroup = new NioEventLoopGroup(); 
+        EventLoopGroup bossGroup = new NioEventLoopGroup(1);
+        EventLoopGroup workerGroup = new NioEventLoopGroup();
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(16);
-        
+
         try {
             ServerBootstrap b = new ServerBootstrap();
             b.group(bossGroup, workerGroup)
@@ -68,9 +58,9 @@ public class NameNodeServer {
                      ch.pipeline().addLast(businessGroup, new NameNodeHandler());
                  }
              })
-             .option(ChannelOption.SO_BACKLOG, 1024) 
+             .option(ChannelOption.SO_BACKLOG, 1024)
              .childOption(ChannelOption.SO_KEEPALIVE, true)
-             .childOption(ChannelOption.TCP_NODELAY, true) 
+             .childOption(ChannelOption.TCP_NODELAY, true)
              .childOption(ChannelOption.SO_RCVBUF, 64 * 1024)
              .childOption(ChannelOption.SO_SNDBUF, 64 * 1024);
 
@@ -132,10 +122,10 @@ public class NameNodeServer {
     @SuppressWarnings("unchecked")
     public static void main(String[] args) throws Exception {
         Map<String, Object> config = ConfigUtil.loadConfig("namenode.yml");
-        
+
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 9090);
-        
+
         // 读取注册中心配置
         String regHost = "localhost";
         int regPort = 8000;
@@ -144,15 +134,15 @@ public class NameNodeServer {
             regHost = (String) regConfig.getOrDefault("host", "localhost");
             regPort = (int) regConfig.getOrDefault("port", 8000);
         }
-        
+
         System.out.println("使用注册中心: " + regHost + ":" + regPort);
-        
+
         // --- 初始化 MetadataManager ---
         MetadataManager metadataManager = null;
         if (config.containsKey("metadata")) {
             Map<String, Object> metaConfig = (Map<String, Object>) config.get("metadata");
             String mode = (String) metaConfig.getOrDefault("mode", "file");
-            
+
             if ("mysql".equalsIgnoreCase(mode)) {
                 System.out.println("使用 MySQL 元数据存储");
                 Map<String, Object> mysqlConfig = (Map<String, Object>) metaConfig.get("mysql");
@@ -161,7 +151,7 @@ public class NameNodeServer {
                 String dbName = (String) mysqlConfig.getOrDefault("database", "jnfs");
                 String user = (String) mysqlConfig.getOrDefault("user", "root");
                 String password = (String) mysqlConfig.getOrDefault("password", "");
-                
+
                 metadataManager = new MySQLMetadataManager(dbHost, dbPort, dbName, user, password);
             } else {
                 System.out.println("使用本地文件元数据存储");
@@ -171,13 +161,13 @@ public class NameNodeServer {
             System.out.println("默认使用本地文件元数据存储");
             metadataManager = new MetadataManager();
         }
-        
+
         // 注入到 Handler
         NameNodeHandler.initMetadataManager(metadataManager);
-        
+
         new NameNodeServer(port, regHost, regPort).run();
     }
-    
+
     // --- 内部 Discovery Handler ---
     private static class DiscoveryHandler extends SimpleChannelInboundHandler<Packet> {
         @Override
@@ -195,7 +185,7 @@ public class NameNodeServer {
             }
             ctx.close();
         }
-        
+
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             ctx.close();

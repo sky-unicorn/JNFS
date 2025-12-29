@@ -3,33 +3,19 @@ package org.jnfs.datanode;
 import cn.hutool.core.net.NetUtil;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelOption;
-import io.netty.channel.EventLoopGroup;
-import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
-import org.jnfs.common.CommandType;
-import org.jnfs.common.ConfigUtil;
-import org.jnfs.common.Packet;
-import org.jnfs.common.PacketDecoder;
-import org.jnfs.common.PacketEncoder;
+import org.jnfs.common.*;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.FileVisitResult;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.SimpleFileVisitor;
+import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -40,7 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * DataNode 服务启动类
  * 负责实际的文件存储
- * 
+ *
  * 升级：添加后台垃圾回收线程 (GC)
  */
 public class DataNodeServer {
@@ -73,7 +59,7 @@ public class DataNodeServer {
         startGarbageCollectorThread();
 
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
-        EventLoopGroup workerGroup = new NioEventLoopGroup(); 
+        EventLoopGroup workerGroup = new NioEventLoopGroup();
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(32);
 
         try {
@@ -88,10 +74,10 @@ public class DataNodeServer {
                      ch.pipeline().addLast(businessGroup, new DataNodeHandler(storagePath));
                  }
              })
-             .option(ChannelOption.SO_BACKLOG, 4096) 
+             .option(ChannelOption.SO_BACKLOG, 4096)
              .childOption(ChannelOption.SO_KEEPALIVE, true)
              .childOption(ChannelOption.TCP_NODELAY, true)
-             .childOption(ChannelOption.SO_RCVBUF, 1024 * 1024) 
+             .childOption(ChannelOption.SO_RCVBUF, 1024 * 1024)
              .childOption(ChannelOption.SO_SNDBUF, 1024 * 1024);
 
             ChannelFuture f = b.bind(port).sync();
@@ -117,7 +103,7 @@ public class DataNodeServer {
             }
         }, 2, 5, TimeUnit.SECONDS);
     }
-    
+
     /**
      * 垃圾回收线程：定期扫描并删除过期的 .tmp 文件
      */
@@ -142,7 +128,7 @@ public class DataNodeServer {
 
         long now = System.currentTimeMillis();
         // 过期时间：1 小时前的临时文件会被删除
-        long expirationTime = 1 * 60 * 60 * 1000L; 
+        long expirationTime = 1 * 60 * 60 * 1000L;
 
         Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
             @Override
@@ -208,28 +194,28 @@ public class DataNodeServer {
             storeDir.mkdirs();
         }
         long freeSpace = storeDir.getFreeSpace();
-        
+
         String payload = advertisedHost + ":" + port + "|" + freeSpace;
-        
+
         Packet packet = new Packet();
         packet.setCommandType(CommandType.REGISTRY_HEARTBEAT);
         packet.setToken(VALID_TOKEN);
         packet.setData(payload.getBytes(StandardCharsets.UTF_8));
-        
+
         channel.writeAndFlush(packet);
     }
 
     @SuppressWarnings("unchecked")
     public static void main(String[] args) throws Exception {
         Map<String, Object> config = ConfigUtil.loadConfig("datanode.yml");
-        
+
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 8080);
         String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtil.getLocalhostStr());
-        
+
         Map<String, Object> storageConfig = (Map<String, Object>) config.get("storage");
         String storagePath = (String) storageConfig.getOrDefault("path", "datanode_files");
-        
+
         String regHost = "localhost";
         int regPort = 8000;
         if (config.containsKey("registry")) {
@@ -237,10 +223,10 @@ public class DataNodeServer {
             regHost = (String) regConfig.getOrDefault("host", "localhost");
             regPort = (int) regConfig.getOrDefault("port", 8000);
         }
-        
+
         System.out.println("使用注册中心: " + regHost + ":" + regPort);
         System.out.println("对外广播地址: " + advertisedHost);
-        
+
         new DataNodeServer(port, advertisedHost, storagePath, regHost, regPort).run();
     }
 }

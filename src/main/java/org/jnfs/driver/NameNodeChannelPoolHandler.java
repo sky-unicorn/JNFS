@@ -1,8 +1,6 @@
 package org.jnfs.driver;
 
-import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
-import io.netty.channel.pool.ChannelHealthChecker;
 import io.netty.channel.pool.ChannelPoolHandler;
 import io.netty.channel.socket.SocketChannel;
 import org.jnfs.common.PacketDecoder;

@@ -8,17 +8,13 @@ import org.jnfs.common.CommandType;
 import org.jnfs.common.Packet;
 
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * NameNode 业务处理器
  * 处理客户端的元数据请求
- * 
+ *
  * 升级：支持动态初始化 MetadataManager
  * 修复：引入 TimedCache 解决 pendingUploads 死锁问题
  */
@@ -31,23 +27,23 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     private static final Map<String, String> hashToId = new ConcurrentHashMap<>();
     private static final Map<String, String> idToHash = new ConcurrentHashMap<>();
     private static final Set<String> persistedHashes = ConcurrentHashMap.newKeySet();
-    
+
     // 使用带过期时间的缓存替代 Set，防止上传意外中断导致的死锁
     // Key: Hash, Value: Timestamp (虽然Value不重要)
     // 过期时间设置为 10 分钟 (600,000 ms)
     private static final TimedCache<String, Boolean> pendingUploads = CacheUtil.newTimedCache(10 * 60 * 1000);
-    
+
     static {
         // 启动定时清理任务，每分钟检查一次过期
         pendingUploads.schedulePrune(60 * 1000);
     }
-    
+
     // 不再 final，不再静态初始化
     private static MetadataManager metadataManager;
 
     // 活跃的 DataNode 列表 (包含 freeSpace 信息)
     private static final List<String> dataNodes = new ArrayList<>();
-    
+
     // 负载均衡器
     private static final LoadBalancer loadBalancer = new MaxFreeSpaceStrategy();
 
@@ -123,7 +119,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     private void handleCheckExistence(ChannelHandlerContext ctx, Packet packet) {
         String hash = new String(packet.getData(), StandardCharsets.UTF_8);
         String storageAddr = hashToStorage.get(hash);
-        
+
         if (storageAddr != null) {
             System.out.println("命中秒传: Hash=" + hash);
             sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, storageAddr.getBytes(StandardCharsets.UTF_8));
@@ -134,7 +130,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     private void handlePreUpload(ChannelHandlerContext ctx, Packet packet) {
         String hash = new String(packet.getData(), StandardCharsets.UTF_8);
-        
+
         synchronized (getLock(hash)) {
             String storageAddr = hashToStorage.get(hash);
             if (storageAddr != null) {
@@ -159,10 +155,10 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             sendResponse(ctx, CommandType.ERROR, "无可用 DataNode".getBytes(StandardCharsets.UTF_8));
             return;
         }
-        
+
         // 使用负载均衡策略选择最佳节点
         String selectedNode = loadBalancer.select(dataNodes);
-        
+
         if (selectedNode != null) {
             // 响应中只包含 host:port，不需要 freeSpace
             sendResponse(ctx, CommandType.NAMENODE_RESPONSE_UPLOAD_LOC, selectedNode.getBytes(StandardCharsets.UTF_8));
@@ -178,12 +174,12 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             sendResponse(ctx, CommandType.ERROR, "格式错误".getBytes(StandardCharsets.UTF_8));
             return;
         }
-        
+
         String filename = parts[0];
         String hash = parts[1];
         String address = parts[2];
         String storageId;
-        
+
         // 1. 快速检查：如果已存在，直接返回
         if (persistedHashes.contains(hash)) {
              storageId = hashToId.get(hash);
@@ -203,11 +199,11 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
                      return;
                  }
             }
-            
+
             pendingUploads.remove(hash);
 
             storageId = hashToId.computeIfAbsent(hash, k -> UUID.randomUUID().toString());
-            idToHash.put(storageId, hash); 
+            idToHash.put(storageId, hash);
 
             // 持久化到 MySQL 或 文件
             if (metadataManager != null) {
@@ -218,19 +214,19 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             hashToStorage.put(hash, address);
             hashToId.put(hash, storageId);
             idToHash.put(storageId, hash);
-            
+
             persistedHashes.add(hash);
-            
+
             System.out.println("文件已注册并持久化: " + filename + ", ID: " + storageId);
         }
-        
+
         sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
     }
 
     private void handleDownloadLocRequest(ChannelHandlerContext ctx, Packet packet) {
         String storageId = new String(packet.getData(), StandardCharsets.UTF_8);
         String hash = idToHash.get(storageId);
-        
+
         if (hash != null) {
             String address = hashToStorage.get(hash);
             String filename = "unknown";
@@ -247,7 +243,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
                 return;
             }
         }
-        
+
         sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));
     }
 

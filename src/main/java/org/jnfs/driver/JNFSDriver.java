@@ -3,14 +3,7 @@ package org.jnfs.driver;
 import cn.hutool.crypto.digest.DigestUtil;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelOption;
-import io.netty.channel.DefaultFileRegion;
-import io.netty.channel.EventLoopGroup;
-import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.pool.AbstractChannelPoolMap;
 import io.netty.channel.pool.ChannelPoolMap;
@@ -19,17 +12,12 @@ import io.netty.channel.pool.SimpleChannelPool;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.Future;
-import org.jnfs.common.CommandType;
-import org.jnfs.common.Packet;
-import org.jnfs.common.PacketDecoder;
-import org.jnfs.common.PacketEncoder;
-import org.jnfs.common.SecurityUtil;
+import org.jnfs.common.*;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.BlockingQueue;
@@ -39,18 +27,18 @@ import java.util.concurrent.TimeUnit;
 /**
  * JNFS Driver (SDK)
  * 提供给客户端应用使用的核心 API
- * 
+ *
  * 升级：使用 Netty ChannelPool 复用 NameNode 连接
  */
 public class JNFSDriver {
 
-    private static final String CLIENT_TOKEN = "jnfs-secure-token-2025"; 
+    private static final String CLIENT_TOKEN = "jnfs-secure-token-2025";
 
     private final String nameNodeHost;
     private final int nameNodePort;
     private final EventLoopGroup group;
     private final String downloadPath;
-    
+
     // 连接池映射: Address -> Pool
     private final ChannelPoolMap<InetSocketAddress, SimpleChannelPool> poolMap;
 
@@ -59,7 +47,7 @@ public class JNFSDriver {
         this.nameNodePort = nameNodePort;
         this.group = new NioEventLoopGroup();
         this.downloadPath = "D:\\data\\jnfs\\download";
-        
+
         // 初始化连接池
         this.poolMap = new AbstractChannelPoolMap<InetSocketAddress, SimpleChannelPool>() {
             @Override
@@ -69,7 +57,7 @@ public class JNFSDriver {
                         .channel(NioSocketChannel.class)
                         .option(ChannelOption.TCP_NODELAY, true)
                         .option(ChannelOption.SO_KEEPALIVE, true);
-                
+
                 // 使用 FixedChannelPool 限制最大连接数，防止资源耗尽
                 return new FixedChannelPool(b.remoteAddress(key), new NameNodeChannelPoolHandler(), 10);
             }
@@ -95,7 +83,7 @@ public class JNFSDriver {
         System.out.println("[Driver] 文件摘要 (SHA256): " + fileHash);
 
         String existingAddr = requestUploadPermission(fileHash);
-        
+
         if (existingAddr != null) {
             System.out.println("[Driver] 发现相同文件 (节点: " + existingAddr + ")，触发秒传...");
             String storageId = commitFile(file.getName(), fileHash, existingAddr);
@@ -114,7 +102,7 @@ public class JNFSDriver {
 
             String dataNodeAddr = getDataNodeForUpload();
             System.out.println("[Driver] 获得上传节点: " + dataNodeAddr);
-            
+
             String[] parts = dataNodeAddr.split(":");
             String dnHost = parts[0];
             int dnPort = Integer.parseInt(parts[1]);
@@ -125,7 +113,7 @@ public class JNFSDriver {
 
             String storageId = commitFile(file.getName(), fileHash, dataNodeAddr);
             System.out.println("[Driver] 文件元数据提交完成，存储编号: " + storageId);
-            
+
             return storageId;
         } finally {
             // 清理临时密文文件
@@ -143,43 +131,43 @@ public class JNFSDriver {
     public File downloadFile(String storageId) throws Exception {
         String locInfo = getDownloadLocation(storageId);
         System.out.println("[Driver] 获取下载信息: " + locInfo);
-        
+
         String[] parts = locInfo.split("\\|");
         if (parts.length != 3) {
             throw new IOException("无效的下载位置信息: " + locInfo);
         }
-        
+
         String filename = parts[0];
         String hash = parts[1]; // 获取 Hash 用于请求下载
         String address = parts[2];
-        
+
         String[] addrParts = address.split(":");
         String dnHost = addrParts[0];
         int dnPort = Integer.parseInt(addrParts[1]);
-        
+
         File downloadDir = new File(downloadPath);
         if (!downloadDir.exists()) {
             downloadDir.mkdirs();
         }
-        
+
         // 先下载到临时密文文件
         File encryptedFile = new File(downloadDir, filename + ".enc");
         File targetFile = new File(downloadDir, filename);
-        
+
         // DataNode 存储的是 Hash 命名的文件 (假设 DataNode 已按 Hash 存储)
         // 或者 DataNode 仍按原名存储? 根据之前的实现是按文件名存储
         // 这里需要与 DataNode 约定下载标识：现在改为传 Hash 下载
         downloadFromDataNode(dnHost, dnPort, hash, encryptedFile);
         System.out.println("[Driver] 密文下载完成: " + encryptedFile.getAbsolutePath());
-        
+
         // --- 解密环节 ---
         System.out.println("[Driver] 正在解密文件...");
         SecurityUtil.decryptFile(encryptedFile, targetFile);
         System.out.println("[Driver] 解密完成: " + targetFile.getAbsolutePath());
-        
+
         // 清理密文
         encryptedFile.delete();
-        
+
         return targetFile;
     }
 
@@ -224,11 +212,11 @@ public class JNFSDriver {
     private String commitFile(String filename, String hash, String dataNodeAddr) throws Exception {
         String payload = filename + "|" + hash + "|" + dataNodeAddr;
         Packet response = sendRequestToNameNode(CommandType.NAMENODE_COMMIT_FILE, payload.getBytes(StandardCharsets.UTF_8));
-        
+
         if (response.getCommandType() == CommandType.ERROR) {
              throw new IOException("提交元数据失败: " + new String(response.getData(), StandardCharsets.UTF_8));
         }
-        
+
         return new String(response.getData(), StandardCharsets.UTF_8);
     }
 
@@ -267,7 +255,7 @@ public class JNFSDriver {
         if (response.getCommandType() == CommandType.ERROR) {
             throw new IOException("DataNode 上传失败: " + new String(response.getData(), StandardCharsets.UTF_8));
         }
-        
+
         channel.close().sync();
     }
 
@@ -303,22 +291,22 @@ public class JNFSDriver {
     private Packet sendRequestToNameNode(CommandType type, byte[] data) throws Exception {
         InetSocketAddress address = new InetSocketAddress(nameNodeHost, nameNodePort);
         SimpleChannelPool pool = poolMap.get(address);
-        
+
         Future<Channel> future = pool.acquire();
         Channel channel = future.sync().getNow(); // 阻塞获取连接
-        
+
         SyncHandler handler = new SyncHandler();
         try {
             // 动态添加业务 Handler
             channel.pipeline().addLast("syncHandler", handler);
-            
+
             Packet packet = new Packet();
             packet.setCommandType(type);
             packet.setToken(CLIENT_TOKEN);
             packet.setData(data);
-            
+
             channel.writeAndFlush(packet);
-            
+
             // 等待响应
             return handler.getResponse();
         } finally {
@@ -331,7 +319,7 @@ public class JNFSDriver {
     }
 
     // ... Handlers ...
-    
+
     private static class SyncHandler extends SimpleChannelInboundHandler<Packet> {
         private final BlockingQueue<Packet> queue = new LinkedBlockingQueue<>();
 
@@ -374,7 +362,7 @@ public class JNFSDriver {
                 if (packet.getCommandType() == CommandType.ERROR) {
                     throw new IOException("服务端错误: " + new String(packet.getData()));
                 }
-                
+
                 // 获取文件大小
                 long streamLen = packet.getStreamLength();
                 if (streamLen > 0) {
@@ -387,7 +375,7 @@ public class JNFSDriver {
                         fileSize = 0;
                     }
                 }
-                
+
                 // 准备接收文件
                 if (targetFile.exists()) {
                     targetFile.delete();
@@ -395,7 +383,7 @@ public class JNFSDriver {
                 FileOutputStream fos = new FileOutputStream(targetFile);
                 fileChannel = fos.getChannel();
                 System.out.println("[Driver] 开始接收文件流，大小: " + fileSize);
-                
+
             } else if (msg instanceof ByteBuf) {
                 // 处理文件流数据
                 ByteBuf buf = (ByteBuf) msg;
@@ -403,7 +391,7 @@ public class JNFSDriver {
                     int readable = buf.readableBytes();
                     buf.readBytes(fileChannel, receivedBytes, readable);
                     receivedBytes += readable;
-                    
+
                     if (receivedBytes >= fileSize) {
                         System.out.println("[Driver] 下载完成");
                         closeFile();
@@ -412,7 +400,7 @@ public class JNFSDriver {
                 }
             }
         }
-        
+
         private void closeFile() {
              if (fileChannel != null) {
                  try {

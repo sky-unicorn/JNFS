@@ -12,13 +12,12 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-
 import java.util.UUID;
 
 /**
  * DataNode 业务处理器
  * 处理文件上传和下载的数据流
- * 
+ *
  * 升级：支持断点续传/垃圾回收，上传时先写 .tmp 文件
  */
 public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
@@ -29,7 +28,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     public static final String TMP_SUFFIX = ".tmp";
 
     private final String storagePath;
-    
+
     // 当前正在接收的文件写入通道
     private FileChannel currentFileChannel;
     // 当前文件输出流
@@ -89,29 +88,29 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         }
 
         long fileSize = packet.getStreamLength();
-        
+
         String fileName = new String(data, StandardCharsets.UTF_8);
-        
+
         System.out.println("准备接收文件: " + fileName + ", 大小: " + fileSize + " 字节");
-        
+
         try {
             if (currentFos != null) {
                 currentFos.close();
             }
             // --- 目录分级逻辑 ---
             File targetFile = getStorageFile(fileName);
-            
+
             // 修复：使用 UUID 生成唯一临时文件名，防止并发上传同一文件时的数据冲突
             String uniqueTmpName = fileName + "." + UUID.randomUUID().toString() + TMP_SUFFIX;
             File tmpFile = new File(targetFile.getParentFile(), uniqueTmpName);
-            
+
             currentFos = new FileOutputStream(tmpFile);
             currentFileChannel = currentFos.getChannel();
             currentFileName = fileName;
             currentTmpFile = tmpFile;
             currentFileSize = fileSize;
             receivedBytes = 0;
-            
+
             if (fileSize == 0) {
                 finishUpload(ctx);
             }
@@ -125,12 +124,12 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         if (currentFileChannel == null) {
             return;
         }
-        
+
         try {
             int readable = chunk.readableBytes();
             chunk.readBytes(currentFileChannel, receivedBytes, readable);
             receivedBytes += readable;
-            
+
             if (receivedBytes >= currentFileSize) {
                 finishUpload(ctx);
             }
@@ -143,7 +142,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
     private void finishUpload(ChannelHandlerContext ctx) {
         closeCurrentFile();
-        
+
         // 重命名 .tmp -> 正式文件
         File finalFile;
         try {
@@ -181,21 +180,21 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             } else {
                 System.err.println("重命名临时文件失败: " + currentTmpFile.getAbsolutePath());
                 // 尝试手动删除失败的 tmp
-                currentTmpFile.delete(); 
+                currentTmpFile.delete();
                 sendResponse(ctx, CommandType.ERROR, "文件存储失败(重命名错误)".getBytes(StandardCharsets.UTF_8));
             }
         }
-        
+
         // 重置状态
         currentFileName = null;
         currentTmpFile = null;
         currentFileSize = 0;
         receivedBytes = 0;
     }
-    
+
     private void handleDownload(ChannelHandlerContext ctx, Packet packet) {
         String filename = new String(packet.getData(), StandardCharsets.UTF_8);
-        
+
         // --- 目录分级逻辑 ---
         File file;
         try {
@@ -204,29 +203,29 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             sendResponse(ctx, CommandType.ERROR, ("非法的文件名: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
             return;
         }
-        
+
         if (!file.exists()) {
             sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));
             return;
         }
-        
+
         System.out.println("开始发送文件: " + filename);
-        
+
         long fileLength = file.length();
         Packet response = new Packet();
         response.setCommandType(CommandType.DOWNLOAD_RESPONSE);
         response.setData(String.valueOf(fileLength).getBytes(StandardCharsets.UTF_8));
         response.setStreamLength(fileLength); // 设置流长度，让 Client 正确跳过 Header
         ctx.write(response);
-        
+
         DefaultFileRegion region = new DefaultFileRegion(file, 0, fileLength);
         ctx.writeAndFlush(region);
     }
-    
+
     /**
      * 根据 Hash (fileName) 获取存储路径
      * 规则: 1-2位为一级目录, 3-4位为二级目录
-     * 
+     *
      * 安全修复: 增加路径遍历检查和文件名格式校验
      */
     private File getStorageFile(String hash) throws IOException {
@@ -240,22 +239,22 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         }
 
         File rootDir = new File(storagePath).getCanonicalFile();
-        
+
         // 防止 Hash 过短
         if (hash.length() < 4) {
             File target = new File(rootDir, hash);
             validatePath(target, rootDir);
             return target;
         }
-        
+
         String dir1 = hash.substring(0, 2);
         String dir2 = hash.substring(2, 4);
-        
+
         File dir = new File(rootDir, dir1 + File.separator + dir2);
         if (!dir.exists()) {
             dir.mkdirs();
         }
-        
+
         File target = new File(dir, hash);
         validatePath(target, rootDir);
         return target;
@@ -305,7 +304,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         receivedBytes = 0;
         super.channelInactive(ctx);
     }
- 
+
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         cause.printStackTrace();
