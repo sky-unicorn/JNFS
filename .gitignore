@@ -18,3 +18,6 @@ target/
 .springBeans
 .sts4-cache
 out/artifacts/JNFS_jar/JNFS.jar
+.vscode/*
+cp.txt
+namenode_meta.log
