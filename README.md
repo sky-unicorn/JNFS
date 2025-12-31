@@ -95,8 +95,8 @@ public class Demo {
             System.out.println("文件上传成功，存储ID: " + storageId);
 
             // 3. 下载文件
-            // 注意：默认下载路径可通过修改 JNFSDriver 源码调整
-            File downloadedFile = driver.downloadFile(storageId);
+            // 指定下载目录 (自动使用原文件名) 或 完整文件路径
+            File downloadedFile = driver.downloadFile(storageId, "downloads/");
             System.out.println("文件已下载到: " + downloadedFile.getAbsolutePath());
             
         } finally {

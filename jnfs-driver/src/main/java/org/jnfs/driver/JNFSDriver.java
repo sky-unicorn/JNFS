@@ -44,7 +44,6 @@ public class JNFSDriver {
     private final boolean useRegistry;
     
     private final EventLoopGroup group;
-    private final String downloadPath;
 
     // NameNode 列表 (Registry 模式下使用)
     private final List<InetSocketAddress> nameNodes = new CopyOnWriteArrayList<>();
@@ -73,7 +72,6 @@ public class JNFSDriver {
         this.useRegistry = (registryHost != null);
         
         this.group = new NioEventLoopGroup();
-        this.downloadPath = "D:\\data\\jnfs\\download";
 
         // 初始化连接池
         this.poolMap = new AbstractChannelPoolMap<InetSocketAddress, SimpleChannelPool>() {
@@ -216,8 +214,10 @@ public class JNFSDriver {
      * 下载文件
      * 1. 下载密文
      * 2. 本地解密
+     * @param storageId 文件存储ID
+     * @param targetPath 下载目标路径 (文件夹或文件全路径)
      */
-    public File downloadFile(String storageId) throws Exception {
+    public File downloadFile(String storageId, String targetPath) throws Exception {
         String locInfo = getDownloadLocation(storageId);
         System.out.println("[Driver] 获取下载信息: " + locInfo);
 
@@ -234,23 +234,33 @@ public class JNFSDriver {
         String dnHost = addrParts[0];
         int dnPort = Integer.parseInt(addrParts[1]);
 
-        File downloadDir = new File(downloadPath);
-        if (!downloadDir.exists()) {
-            downloadDir.mkdirs();
+        // 解析目标文件路径
+        File targetFile;
+        File destination = new File(targetPath);
+        if (destination.exists() && destination.isDirectory()) {
+            targetFile = new File(destination, filename);
+        } else {
+            // 如果不存在，或者是个文件路径
+            targetFile = destination;
+            // 确保父目录存在
+            File parent = targetFile.getParentFile();
+            if (parent != null && !parent.exists()) {
+                parent.mkdirs();
+            }
         }
 
-        // 先下载到临时密文文件
-        File encryptedFile = new File(downloadDir, filename + ".enc");
-        File targetFile = new File(downloadDir, filename);
+        // 先下载到临时密文文件 (与目标文件同目录)
+        File encryptedFile = new File(targetFile.getParentFile(), targetFile.getName() + ".enc");
 
         // DataNode 存储的是 Hash 命名的文件 (假设 DataNode 已按 Hash 存储)
-        // 或者 DataNode 仍按原名存储? 根据之前的实现是按文件名存储
-        // 这里需要与 DataNode 约定下载标识：现在改为传 Hash 下载
         downloadFromDataNode(dnHost, dnPort, hash, encryptedFile);
         System.out.println("[Driver] 密文下载完成: " + encryptedFile.getAbsolutePath());
 
         // --- 解密环节 ---
         System.out.println("[Driver] 正在解密文件...");
+        if (targetFile.exists()) {
+            targetFile.delete();
+        }
         SecurityUtil.decryptFile(encryptedFile, targetFile);
         System.out.println("[Driver] 解密完成: " + targetFile.getAbsolutePath());
 

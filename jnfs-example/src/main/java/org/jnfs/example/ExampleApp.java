@@ -105,7 +105,7 @@ public class ExampleApp {
             System.out.println("\n=== 开始下载文件 ===");
             long startDownload = System.currentTimeMillis();
 
-            File downloadedFile = driver.downloadFile(storageId);
+            File downloadedFile = driver.downloadFile(storageId, "D:\\data\\jnfs\\download");
 
             long endDownload = System.currentTimeMillis();
             System.out.printf("下载总耗时: %.2f 秒%n", (endDownload - startDownload) / 1000.0);
