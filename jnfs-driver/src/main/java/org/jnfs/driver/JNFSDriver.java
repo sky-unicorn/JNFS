@@ -39,8 +39,6 @@ public class JNFSDriver {
 
     private static final String CLIENT_TOKEN = "jnfs-secure-token-2025";
 
-    private final String nameNodeHost;
-    private final int nameNodePort;
     private final String registryHost;
     private final int registryPort;
     private final boolean useRegistry;
@@ -70,8 +68,6 @@ public class JNFSDriver {
     }
 
     private JNFSDriver(String nameNodeHost, int nameNodePort, String registryHost, int registryPort) {
-        this.nameNodeHost = nameNodeHost;
-        this.nameNodePort = nameNodePort;
         this.registryHost = registryHost;
         this.registryPort = registryPort;
         this.useRegistry = (registryHost != null);
