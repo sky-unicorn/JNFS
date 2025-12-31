@@ -358,6 +358,7 @@ public class JNFSDriver {
 
     private static class DownloadHandler extends SimpleChannelInboundHandler<Object> {
         private final File targetFile;
+        private FileOutputStream fos;
         private FileChannel fileChannel;
         private long fileSize = -1;
         private long receivedBytes = 0;
@@ -393,8 +394,8 @@ public class JNFSDriver {
                 if (targetFile.exists()) {
                     targetFile.delete();
                 }
-                FileOutputStream fos = new FileOutputStream(targetFile);
-                fileChannel = fos.getChannel();
+                this.fos = new FileOutputStream(targetFile);
+                this.fileChannel = this.fos.getChannel();
                 System.out.println("[Driver] 开始接收文件流，大小: " + fileSize);
 
             } else if (msg instanceof ByteBuf) {
@@ -415,13 +416,18 @@ public class JNFSDriver {
         }
 
         private void closeFile() {
-             if (fileChannel != null) {
-                 try {
+             try {
+                 if (fileChannel != null) {
                      fileChannel.close();
-                 } catch (IOException e) {
-                     e.printStackTrace();
                  }
+                 if (fos != null) {
+                     fos.close();
+                 }
+             } catch (IOException e) {
+                 e.printStackTrace();
+             } finally {
                  fileChannel = null;
+                 fos = null;
              }
         }
 
