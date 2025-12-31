@@ -38,6 +38,8 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
     // DataNode 列表: address -> NodeInfo
     private static final Map<String, NodeInfo> dataNodes = new ConcurrentHashMap<>();
+    // NameNode 列表: address -> NodeInfo
+    private static final Map<String, NodeInfo> nameNodes = new ConcurrentHashMap<>();
     
     private static final long HEARTBEAT_TIMEOUT = 30 * 1000;
 
@@ -53,11 +55,19 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         cleanerExecutor.scheduleAtFixedRate(() -> {
             try {
                 long now = System.currentTimeMillis();
-                int initialSize = dataNodes.size();
+                
+                int dnInit = dataNodes.size();
                 dataNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > HEARTBEAT_TIMEOUT);
-                int finalSize = dataNodes.size();
-                if (initialSize != finalSize) {
-                    System.out.println("[Registry-Cleaner] 清理了 " + (initialSize - finalSize) + " 个过期节点");
+                int dnFinal = dataNodes.size();
+                if (dnInit != dnFinal) {
+                    System.out.println("[Registry-Cleaner] 清理了 " + (dnInit - dnFinal) + " 个过期 DataNode");
+                }
+                
+                int nnInit = nameNodes.size();
+                nameNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > HEARTBEAT_TIMEOUT);
+                int nnFinal = nameNodes.size();
+                if (nnInit != nnFinal) {
+                    System.out.println("[Registry-Cleaner] 清理了 " + (nnInit - nnFinal) + " 个过期 NameNode");
                 }
             } catch (Exception e) {
                 e.printStackTrace();
@@ -70,6 +80,10 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
      */
     public static Map<String, NodeInfo> getDataNodes() {
         return Collections.unmodifiableMap(dataNodes);
+    }
+    
+    public static Map<String, NodeInfo> getNameNodes() {
+        return Collections.unmodifiableMap(nameNodes);
     }
 
     @Override
@@ -89,6 +103,13 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
                 break;
             case REGISTRY_GET_DATANODES:
                 handleGetDataNodes(ctx);
+                break;
+            case REGISTRY_REGISTER_NAMENODE:
+            case REGISTRY_HEARTBEAT_NAMENODE:
+                handleRegisterOrHeartbeatNameNode(ctx, packet);
+                break;
+            case REGISTRY_GET_NAMENODES:
+                handleGetNameNodes(ctx);
                 break;
             default:
                 sendResponse(ctx, CommandType.ERROR, "未知命令".getBytes(StandardCharsets.UTF_8));
@@ -120,6 +141,17 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         }
     }
 
+    private void handleRegisterOrHeartbeatNameNode(ChannelHandlerContext ctx, Packet packet) {
+        String address = new String(packet.getData(), StandardCharsets.UTF_8);
+        
+        nameNodes.put(address, new NodeInfo(System.currentTimeMillis(), 0));
+        
+        if (packet.getCommandType() == CommandType.REGISTRY_REGISTER_NAMENODE) {
+            System.out.println("NameNode 注册成功: " + address);
+            sendResponse(ctx, CommandType.REGISTRY_RESPONSE_REGISTER_NAMENODE, "OK".getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
     private void handleGetDataNodes(ChannelHandlerContext ctx) {
         long now = System.currentTimeMillis();
         List<String> activeNodes = new ArrayList<>();
@@ -132,6 +164,20 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         
         String response = String.join(",", activeNodes);
         sendResponse(ctx, CommandType.REGISTRY_RESPONSE_DATANODES, response.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void handleGetNameNodes(ChannelHandlerContext ctx) {
+        long now = System.currentTimeMillis();
+        List<String> activeNodes = new ArrayList<>();
+        
+        nameNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > HEARTBEAT_TIMEOUT);
+        
+        for (String address : nameNodes.keySet()) {
+            activeNodes.add(address);
+        }
+        
+        String response = String.join(",", activeNodes);
+        sendResponse(ctx, CommandType.REGISTRY_RESPONSE_NAMENODES, response.getBytes(StandardCharsets.UTF_8));
     }
 
     private void sendResponse(ChannelHandlerContext ctx, CommandType type, byte[] data) {

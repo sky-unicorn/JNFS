@@ -20,9 +20,14 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * JNFS Driver (SDK)
@@ -36,15 +41,41 @@ public class JNFSDriver {
 
     private final String nameNodeHost;
     private final int nameNodePort;
+    private final String registryHost;
+    private final int registryPort;
+    private final boolean useRegistry;
+    
     private final EventLoopGroup group;
     private final String downloadPath;
+
+    // NameNode 列表 (Registry 模式下使用)
+    private final List<InetSocketAddress> nameNodes = new CopyOnWriteArrayList<>();
+    private final AtomicInteger nextNameNodeIndex = new AtomicInteger(0);
 
     // 连接池映射: Address -> Pool
     private final ChannelPoolMap<InetSocketAddress, SimpleChannelPool> poolMap;
 
+    /**
+     * 直连模式构造函数
+     */
     public JNFSDriver(String nameNodeHost, int nameNodePort) {
+        this(nameNodeHost, nameNodePort, null, 0);
+    }
+
+    /**
+     * 注册中心模式 (静态工厂方法)
+     */
+    public static JNFSDriver useRegistry(String registryHost, int registryPort) {
+        return new JNFSDriver(null, 0, registryHost, registryPort);
+    }
+
+    private JNFSDriver(String nameNodeHost, int nameNodePort, String registryHost, int registryPort) {
         this.nameNodeHost = nameNodeHost;
         this.nameNodePort = nameNodePort;
+        this.registryHost = registryHost;
+        this.registryPort = registryPort;
+        this.useRegistry = (registryHost != null);
+        
         this.group = new NioEventLoopGroup();
         this.downloadPath = "D:\\data\\jnfs\\download";
 
@@ -62,6 +93,68 @@ public class JNFSDriver {
                 return new FixedChannelPool(b.remoteAddress(key), new NameNodeChannelPoolHandler(), 10);
             }
         };
+        
+        if (useRegistry) {
+            refreshNameNodes();
+            startNameNodeRefreshThread();
+        } else {
+            // 直连模式，直接添加单一节点
+            nameNodes.add(new InetSocketAddress(nameNodeHost, nameNodePort));
+        }
+    }
+    
+    private void startNameNodeRefreshThread() {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "Driver-Refresh");
+            t.setDaemon(true);
+            return t;
+        });
+        scheduler.scheduleAtFixedRate(this::refreshNameNodes, 10, 10, TimeUnit.SECONDS);
+    }
+
+    private void refreshNameNodes() {
+        Bootstrap b = new Bootstrap();
+        RegistryDiscoveryHandler handler = new RegistryDiscoveryHandler();
+        
+        // 使用临时的 EventLoopGroup 避免阻塞主 group，或者直接复用 group
+        // 这里为了简单复用 group，注意不要阻塞
+        b.group(group)
+         .channel(NioSocketChannel.class)
+         .handler(new ChannelInitializer<SocketChannel>() {
+             @Override
+             protected void initChannel(SocketChannel ch) {
+                 ch.pipeline().addLast(new PacketDecoder());
+                 ch.pipeline().addLast(new PacketEncoder());
+                 ch.pipeline().addLast(handler);
+             }
+         });
+
+        try {
+            ChannelFuture f = b.connect(registryHost, registryPort).sync();
+            Channel channel = f.channel();
+
+            Packet request = new Packet();
+            request.setCommandType(CommandType.REGISTRY_GET_NAMENODES);
+            request.setToken(CLIENT_TOKEN);
+            channel.writeAndFlush(request);
+
+            f.channel().closeFuture().sync();
+            
+            List<String> nodes = handler.getNodes();
+            if (nodes != null && !nodes.isEmpty()) {
+                nameNodes.clear();
+                for (String node : nodes) {
+                    // node format: host:port
+                    String[] parts = node.split(":");
+                    if (parts.length == 2) {
+                        nameNodes.add(new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
+                    }
+                }
+                System.out.println("[Driver] 刷新 NameNode 列表: " + nameNodes);
+            }
+        } catch (Exception e) {
+            System.err.println("[Driver] 刷新 NameNode 列表失败: " + e.getMessage());
+        }
     }
 
     public void close() {
@@ -289,21 +382,51 @@ public class JNFSDriver {
 
     // --- 使用连接池发送请求 ---
     private Packet sendRequestToNameNode(CommandType type, byte[] data) throws Exception {
-        InetSocketAddress address = new InetSocketAddress(nameNodeHost, nameNodePort);
+        if (nameNodes.isEmpty()) {
+            if (useRegistry) refreshNameNodes();
+            if (nameNodes.isEmpty()) throw new IOException("无可用 NameNode");
+        }
+
+        Exception lastException = null;
+        int attempts = 0;
+        int maxAttempts = nameNodes.size(); // 尝试所有节点
+
+        // 简单的负载均衡 + 故障转移
+        while (attempts < maxAttempts) {
+            int index = nextNameNodeIndex.getAndIncrement();
+            InetSocketAddress address = nameNodes.get(Math.abs(index % nameNodes.size()));
+            
+            try {
+                return doSendRequest(address, type, data);
+            } catch (Exception e) {
+                System.err.println("[Driver] 连接 NameNode (" + address + ") 失败: " + e.getMessage() + "，尝试下一个...");
+                lastException = e;
+                attempts++;
+            }
+        }
+        throw new IOException("所有 NameNode 均不可用", lastException);
+    }
+
+    private Packet doSendRequest(InetSocketAddress address, CommandType type, byte[] data) throws Exception {
         SimpleChannelPool pool = poolMap.get(address);
         
         Future<Channel> future = pool.acquire();
-        Channel channel = future.sync().getNow(); // 阻塞获取连接
+        // 设置连接超时，防止卡死
+        if (!future.await(3000)) {
+             throw new IOException("获取连接超时");
+        }
+        if (!future.isSuccess()) {
+            throw new IOException("无法连接 NameNode", future.cause());
+        }
+        
+        Channel channel = future.getNow();
         
         SyncHandler handler = new SyncHandler();
         try {
-            // 防御性清理：确保 Pipeline 中没有残留的 syncHandler
-            // (虽然 finally 中有清理，但为了防止上一次 release 时的意外情况，这里再次检查)
             if (channel.pipeline().get("syncHandler") != null) {
                 channel.pipeline().remove("syncHandler");
             }
 
-            // 动态添加业务 Handler
             channel.pipeline().addLast("syncHandler", handler);
             
             Packet packet = new Packet();
@@ -313,19 +436,14 @@ public class JNFSDriver {
             
             channel.writeAndFlush(packet);
             
-            // 等待响应
             return handler.getResponse();
         } finally {
-            // 清理 Handler 并释放连接回池
-            // 使用 try-catch 确保即使 remove 抛出异常 (极少见)，也能释放连接
             try {
                 if (channel.pipeline().get("syncHandler") != null) {
                     channel.pipeline().remove("syncHandler");
                 }
             } catch (Exception e) {
-                System.err.println("移除 Handler 失败: " + e.getMessage());
-                // 此时连接可能已污染，考虑关闭它而不是放回池中?
-                // 目前 SimpleChannelPool 没有直接销毁接口，但 release 会处理
+                // ignore
             }
             pool.release(channel);
         }
@@ -352,6 +470,33 @@ public class JNFSDriver {
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             cause.printStackTrace();
+            ctx.close();
+        }
+    }
+
+    private static class RegistryDiscoveryHandler extends SimpleChannelInboundHandler<Packet> {
+        private final List<String> nodes = new CopyOnWriteArrayList<>();
+        
+        @Override
+        protected void channelRead0(ChannelHandlerContext ctx, Packet packet) {
+            if (packet.getCommandType() == CommandType.REGISTRY_RESPONSE_NAMENODES) {
+                String content = new String(packet.getData(), StandardCharsets.UTF_8);
+                if (!content.isEmpty()) {
+                    String[] parts = content.split(",");
+                    for (String part : parts) {
+                        nodes.add(part);
+                    }
+                }
+            }
+            ctx.close();
+        }
+        
+        public List<String> getNodes() {
+            return nodes;
+        }
+        
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             ctx.close();
         }
     }

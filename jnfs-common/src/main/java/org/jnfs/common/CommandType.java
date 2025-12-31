@@ -52,6 +52,17 @@ public enum CommandType {
     REGISTRY_GET_DATANODES((byte) 33),
     /** 响应 DataNode 列表 */
     REGISTRY_RESPONSE_DATANODES((byte) 34),
+    
+    /** NameNode 注册 (To Registry) */
+    REGISTRY_REGISTER_NAMENODE((byte) 35),
+    /** NameNode 注册响应 */
+    REGISTRY_RESPONSE_REGISTER_NAMENODE((byte) 36),
+    /** 获取 NameNode 列表 (To Registry) */
+    REGISTRY_GET_NAMENODES((byte) 37),
+    /** 响应 NameNode 列表 */
+    REGISTRY_RESPONSE_NAMENODES((byte) 38),
+    /** NameNode 心跳 */
+    REGISTRY_HEARTBEAT_NAMENODE((byte) 39),
 
     /** 错误消息 */
     ERROR((byte) -1);

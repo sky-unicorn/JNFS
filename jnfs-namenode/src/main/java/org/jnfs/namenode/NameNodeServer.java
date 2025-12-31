@@ -29,11 +29,13 @@ public class NameNodeServer {
     private static final String VALID_TOKEN = "jnfs-secure-token-2025";
 
     private final int port;
+    private final String advertisedHost;
     private final String registryHost;
     private final int registryPort;
 
-    public NameNodeServer(int port, String registryHost, int registryPort) {
+    public NameNodeServer(int port, String advertisedHost, String registryHost, int registryPort) {
         this.port = port;
+        this.advertisedHost = advertisedHost;
         this.registryHost = registryHost;
         this.registryPort = registryPort;
     }
@@ -41,6 +43,8 @@ public class NameNodeServer {
     public void run() throws Exception {
         // 启动后台线程定期从注册中心拉取 DataNode 列表
         startDiscoveryThread();
+        // 启动注册与心跳线程
+        startRegistrationHeartbeatThread();
 
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
         EventLoopGroup workerGroup = new NioEventLoopGroup();
@@ -72,6 +76,49 @@ public class NameNodeServer {
             workerGroup.shutdownGracefully();
             bossGroup.shutdownGracefully();
             businessGroup.shutdownGracefully();
+        }
+    }
+
+    private void startRegistrationHeartbeatThread() {
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                sendHeartbeatToRegistry();
+            } catch (Exception e) {
+                System.err.println("发送心跳失败: " + e.getMessage());
+            }
+        }, 0, 10, TimeUnit.SECONDS);
+    }
+
+    private void sendHeartbeatToRegistry() {
+        EventLoopGroup group = new NioEventLoopGroup();
+        try {
+            Bootstrap b = new Bootstrap();
+            b.group(group)
+             .channel(NioSocketChannel.class)
+             .handler(new ChannelInitializer<SocketChannel>() {
+                 @Override
+                 protected void initChannel(SocketChannel ch) {
+                     ch.pipeline().addLast(new PacketEncoder());
+                 }
+             });
+
+            ChannelFuture f = b.connect(registryHost, registryPort).sync();
+            Channel channel = f.channel();
+
+            String payload = advertisedHost + ":" + port;
+            
+            Packet packet = new Packet();
+            packet.setCommandType(CommandType.REGISTRY_HEARTBEAT_NAMENODE);
+            packet.setToken(VALID_TOKEN);
+            packet.setData(payload.getBytes(StandardCharsets.UTF_8));
+            
+            channel.writeAndFlush(packet).sync();
+            channel.close().sync();
+        } catch (Exception e) {
+            // System.err.println("注册/心跳失败: " + e.getMessage());
+        } finally {
+            group.shutdownGracefully();
         }
     }
 
@@ -125,6 +172,7 @@ public class NameNodeServer {
 
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 9090);
+        String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", "localhost");
 
         // 读取注册中心配置
         String regHost = "localhost";
@@ -136,6 +184,7 @@ public class NameNodeServer {
         }
 
         System.out.println("使用注册中心: " + regHost + ":" + regPort);
+        System.out.println("对外广播地址: " + advertisedHost);
 
         // --- 初始化 MetadataManager ---
         MetadataManager metadataManager = null;
@@ -165,7 +214,7 @@ public class NameNodeServer {
         // 注入到 Handler
         NameNodeHandler.initMetadataManager(metadataManager);
 
-        new NameNodeServer(port, regHost, regPort).run();
+        new NameNodeServer(port, advertisedHost, regHost, regPort).run();
     }
 
     // --- 内部 Discovery Handler ---
