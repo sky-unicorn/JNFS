@@ -59,7 +59,25 @@ chmod +x *.sh
 3. `start-datanode` (端口 8080)
 
 ### 4. SDK 使用示例
-JNFS 提供了简单的 Java SDK。首先将 `jnfs-driver` 安装到本地 Maven 仓库或引入 Jar 包。
+JNFS 提供了灵活的 Java SDK，支持**单点直连**和**集群发现**两种模式。首先将 `jnfs-driver` 安装到本地 Maven 仓库或引入 Jar 包。
+
+#### 初始化方式
+
+**方式一：直连模式 (简单测试)**
+适用于开发测试或 NameNode 单点部署的场景。
+```java
+// 直接连接指定的 NameNode IP 和端口
+JNFSDriver driver = new JNFSDriver("localhost", 9090);
+```
+
+**方式二：高可用模式 (推荐生产使用)**
+连接注册中心，自动发现可用的 NameNode 集群，支持负载均衡和故障转移。
+```java
+// 连接 Registry，自动获取 NameNode 列表
+JNFSDriver driver = JNFSDriver.useRegistry("localhost", 8000);
+```
+
+#### 完整代码示例
 
 ```java
 import org.jnfs.driver.JNFSDriver;
@@ -67,8 +85,8 @@ import java.io.File;
 
 public class Demo {
     public static void main(String[] args) throws Exception {
-        // 1. 初始化 Driver (指定 NameNode 地址)
-        JNFSDriver driver = new JNFSDriver("localhost", 9090);
+        // 1. 初始化 Driver (此处演示高可用模式)
+        JNFSDriver driver = JNFSDriver.useRegistry("localhost", 8000);
 
         try {
             // 2. 上传文件
