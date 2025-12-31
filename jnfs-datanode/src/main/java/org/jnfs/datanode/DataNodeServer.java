@@ -1,5 +1,6 @@
 package org.jnfs.datanode;
 
+import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.net.NetUtil;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
@@ -215,6 +216,7 @@ public class DataNodeServer {
 
         Map<String, Object> storageConfig = (Map<String, Object>) config.get("storage");
         String storagePath = (String) storageConfig.getOrDefault("path", "datanode_files");
+        storagePath = FileUtil.normalize(storagePath);
 
         String regHost = "localhost";
         int regPort = 8000;

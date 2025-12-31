@@ -1,5 +1,6 @@
 package org.jnfs.driver;
 
+import cn.hutool.core.io.FileUtil;
 import cn.hutool.crypto.digest.DigestUtil;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
@@ -236,17 +237,24 @@ public class JNFSDriver {
 
         // 解析目标文件路径
         File targetFile;
-        File destination = new File(targetPath);
-        if (destination.exists() && destination.isDirectory()) {
+        // 使用 Hutool 标准化路径 (处理分隔符、..、重复斜杠等)
+        String normalizedPath = FileUtil.normalize(targetPath);
+        File destination = new File(normalizedPath);
+        
+        // 判断是否为目录：
+        // 1. 原始路径以分隔符结尾 (Hutool normalize 会去掉末尾分隔符，所以要用 targetPath 判断)
+        // 2. 或者 destination 已存在且是目录
+        boolean isDirectory = targetPath.endsWith("/") || targetPath.endsWith("\\") || FileUtil.isDirectory(destination);
+
+        if (isDirectory) {
+            // 如果是目录路径，确保目录存在
+            FileUtil.mkdir(destination);
             targetFile = new File(destination, filename);
         } else {
-            // 如果不存在，或者是个文件路径
+            // 否则视为完整的文件路径 (重命名)
             targetFile = destination;
             // 确保父目录存在
-            File parent = targetFile.getParentFile();
-            if (parent != null && !parent.exists()) {
-                parent.mkdirs();
-            }
+            FileUtil.mkParentDirs(targetFile);
         }
 
         // 先下载到临时密文文件 (与目标文件同目录)
