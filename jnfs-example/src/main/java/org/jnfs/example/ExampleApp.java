@@ -1,6 +1,5 @@
 package org.jnfs.example;
 
-import org.jnfs.driver.JNFSDriver;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
@@ -11,11 +10,10 @@ import org.jnfs.common.CommandType;
 import org.jnfs.common.Packet;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
+import org.jnfs.driver.JNFSDriver;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Scanner;
@@ -82,7 +80,7 @@ public class ExampleApp {
         try {
             String filePath = "E:\\back-up\\backup.7z";
             File file = new File(filePath);
-            
+
             if (!file.exists()) {
                 System.out.println("警告: 未找到目标文件 " + filePath);
                 file = new File("large_test.dat");
@@ -95,18 +93,18 @@ public class ExampleApp {
             }
             System.out.println("=== 开始上传文件: " + file.getName() + " ===");
             long startUpload = System.currentTimeMillis();
-            
+
             String storageId = driver.uploadFile(file);
-            
+
             long endUpload = System.currentTimeMillis();
             System.out.printf("上传总耗时: %.2f 秒%n", (endUpload - startUpload) / 1000.0);
             System.out.println("存储编号: " + storageId);
 
             System.out.println("\n=== 开始下载文件 ===");
             long startDownload = System.currentTimeMillis();
-            
+
             File downloadedFile = driver.downloadFile(storageId);
-            
+
             long endDownload = System.currentTimeMillis();
             System.out.printf("下载总耗时: %.2f 秒%n", (endDownload - startDownload) / 1000.0);
             System.out.println("文件保存路径: " + downloadedFile.getAbsolutePath());
@@ -152,7 +150,7 @@ public class ExampleApp {
         executor.awaitTermination(1, TimeUnit.MINUTES);
         long end = System.currentTimeMillis();
         System.out.println("测试结束，耗时: " + (end - start) + "ms");
-        
+
         driver.close();
         testFile.delete();
     }
@@ -188,7 +186,7 @@ public class ExampleApp {
 
             String maliciousName = "../../../malicious_file.txt";
             byte[] nameBytes = maliciousName.getBytes(StandardCharsets.UTF_8);
-            
+
             Packet packet = new Packet();
             packet.setCommandType(CommandType.UPLOAD_REQUEST);
             packet.setToken(CLIENT_TOKEN);
@@ -251,9 +249,9 @@ public class ExampleApp {
         try {
             System.out.println("=== 测试场景 1: 10个线程并发上传 [同一文件] (预期: 互斥) ===");
             testLockConcurrency(group, "SAME_FILE_HASH", 10);
-            
+
             Thread.sleep(1000);
-            
+
             System.out.println("\n=== 测试场景 2: 10个线程并发上传 [不同文件] (预期: 并行) ===");
             testLockConcurrency(group, null, 10);
         } finally {
@@ -266,7 +264,7 @@ public class ExampleApp {
         CountDownLatch latch = new CountDownLatch(threadCount);
         AtomicInteger allowCount = new AtomicInteger(0);
         AtomicInteger waitCount = new AtomicInteger(0);
-        
+
         long start = System.currentTimeMillis();
 
         for (int i = 0; i < threadCount; i++) {
@@ -359,7 +357,7 @@ public class ExampleApp {
         executor.shutdown();
         System.out.println("成功(Winner): " + successCount.get());
         System.out.println("跳过(Followers): " + skipCount.get());
-        
+
         if (targetFile.exists()) targetFile.delete();
         dir.delete();
     }

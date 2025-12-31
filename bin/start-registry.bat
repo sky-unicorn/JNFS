@@ -1,23 +1,18 @@
 @echo off
 setlocal
 
-set JAR_NAME=JNFS-0.0.1-SNAPSHOT.jar
-set TARGET_DIR=..\target
+cd /d %~dp0..
 
-if exist "%TARGET_DIR%\%JAR_NAME%" (
-    set JAR_PATH=%TARGET_DIR%\%JAR_NAME%
-) else (
-    if exist "%JAR_NAME%" (
-        set JAR_PATH=%JAR_NAME%
-    ) else (
-        echo Error: Cannot find %JAR_NAME% in target directory or current directory.
-        echo Please run 'mvn package' first.
-        pause
-        exit /b 1
-    )
+set JAR_PATH=jnfs-registry\target\jnfs-registry-0.0.1-SNAPSHOT.jar
+
+if not exist "%JAR_PATH%" (
+    echo Error: Cannot find %JAR_PATH%
+    echo Please run 'mvn package' first.
+    pause
+    exit /b 1
 )
 
-echo Starting JNFS Registry Server...
+echo Starting JNFS Registry...
 title JNFS Registry
-java -cp "%JAR_PATH%" org.jnfs.registry.RegistryServer
+java -jar "%JAR_PATH%"
 pause
