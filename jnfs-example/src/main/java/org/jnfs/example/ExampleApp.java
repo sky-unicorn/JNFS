@@ -71,6 +71,8 @@ public class ExampleApp {
             }
         } catch (Exception e) {
             e.printStackTrace();
+        } finally {
+            scanner.close();
         }
     }
 
