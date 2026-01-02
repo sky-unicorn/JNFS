@@ -212,7 +212,8 @@ public class DataNodeServer {
 
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 8080);
-        String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtil.getLocalhostStr());
+        // 如果没有配置 advertised_host，则自动获取本机 IP
+        String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtils.getLocalIp());
 
         Map<String, Object> storageConfig = (Map<String, Object>) config.get("storage");
         String storagePath = (String) storageConfig.getOrDefault("path", "datanode_files");

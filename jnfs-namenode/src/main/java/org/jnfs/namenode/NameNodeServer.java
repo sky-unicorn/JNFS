@@ -172,7 +172,8 @@ public class NameNodeServer {
 
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 9090);
-        String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", "localhost");
+        // 如果没有配置 advertised_host，则自动获取本机 IP
+        String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtils.getLocalIp());
 
         // 读取注册中心配置
         String regHost = "localhost";
