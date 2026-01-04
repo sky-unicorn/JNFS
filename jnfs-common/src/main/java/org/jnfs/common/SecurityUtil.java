@@ -39,4 +39,20 @@ public class SecurityUtil {
             aes.decrypt(in, out, true);
         }
     }
+
+    /**
+     * 创建解密输出流
+     * @param out 底层输出流
+     * @return 包装后的解密流
+     */
+    public static OutputStream createDecryptOutputStream(OutputStream out) {
+        try {
+            // 保持与 SecureUtil.aes(DEFAULT_KEY) 一致的算法配置
+            javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("AES");
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, new javax.crypto.spec.SecretKeySpec(DEFAULT_KEY, "AES"));
+            return new javax.crypto.CipherOutputStream(out, cipher);
+        } catch (Exception e) {
+            throw new RuntimeException("创建解密流失败", e);
+        }
+    }
 }

@@ -18,6 +18,7 @@ import org.jnfs.common.*;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
@@ -258,13 +259,15 @@ public class JNFSDriver {
         }
 
         // 先下载到临时密文文件 (与目标文件同目录)
-        File encryptedFile = new File(targetFile.getParentFile(), targetFile.getName() + ".enc");
+        // File encryptedFile = new File(targetFile.getParentFile(), targetFile.getName() + ".enc");
 
         // DataNode 存储的是 Hash 命名的文件 (假设 DataNode 已按 Hash 存储)
-        downloadFromDataNode(dnHost, dnPort, hash, encryptedFile);
-        System.out.println("[Driver] 密文下载完成: " + encryptedFile.getAbsolutePath());
+        // 支持流式解密，直接下载到目标文件
+        downloadFromDataNode(dnHost, dnPort, hash, targetFile);
+        System.out.println("[Driver] 下载并解密完成: " + targetFile.getAbsolutePath());
 
-        // --- 解密环节 ---
+        /*
+        // --- 解密环节 (已改为流式解密，不再需要后续步骤) ---
         System.out.println("[Driver] 正在解密文件...");
         if (targetFile.exists()) {
             targetFile.delete();
@@ -274,6 +277,7 @@ public class JNFSDriver {
 
         // 清理密文
         encryptedFile.delete();
+        */
 
         return targetFile;
     }
@@ -517,8 +521,7 @@ public class JNFSDriver {
 
     private static class DownloadHandler extends SimpleChannelInboundHandler<Object> {
         private final File targetFile;
-        private FileOutputStream fos;
-        private FileChannel fileChannel;
+        private OutputStream out;
         private long fileSize = -1;
         private long receivedBytes = 0;
         private final BlockingQueue<Boolean> completionSignal = new LinkedBlockingQueue<>();
@@ -553,17 +556,18 @@ public class JNFSDriver {
                 if (targetFile.exists()) {
                     targetFile.delete();
                 }
-                this.fos = new FileOutputStream(targetFile);
-                this.fileChannel = this.fos.getChannel();
+                // 使用 SecurityUtil 创建流式解密输出流
+                this.out = SecurityUtil.createDecryptOutputStream(new FileOutputStream(targetFile));
                 System.out.println("[Driver] 开始接收文件流，大小: " + fileSize);
 
             } else if (msg instanceof ByteBuf) {
                 // 处理文件流数据
                 ByteBuf buf = (ByteBuf) msg;
-                if (fileChannel != null) {
-                    int readable = buf.readableBytes();
-                    buf.readBytes(fileChannel, receivedBytes, readable);
-                    receivedBytes += readable;
+                if (out != null) {
+                    byte[] bytes = new byte[buf.readableBytes()];
+                    buf.readBytes(bytes);
+                    out.write(bytes);
+                    receivedBytes += bytes.length;
 
                     if (receivedBytes >= fileSize) {
                         System.out.println("[Driver] 下载完成");
@@ -576,17 +580,13 @@ public class JNFSDriver {
 
         private void closeFile() {
              try {
-                 if (fileChannel != null) {
-                     fileChannel.close();
-                 }
-                 if (fos != null) {
-                     fos.close();
+                 if (out != null) {
+                     out.close();
                  }
              } catch (IOException e) {
                  e.printStackTrace();
              } finally {
-                 fileChannel = null;
-                 fos = null;
+                 out = null;
              }
         }
 
