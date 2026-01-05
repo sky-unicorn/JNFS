@@ -14,10 +14,12 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
+import java.util.List;
+
 /**
  * DataNode 业务处理器
  * 处理文件上传和下载的数据流
- *
+ * 
  * 升级：支持断点续传/垃圾回收，上传时先写 .tmp 文件
  */
 public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
@@ -27,8 +29,8 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     // 临时文件后缀
     public static final String TMP_SUFFIX = ".tmp";
 
-    private final String storagePath;
-
+    private final List<String> storagePaths;
+    
     // 当前正在接收的文件写入通道
     private FileChannel currentFileChannel;
     // 当前文件输出流
@@ -42,17 +44,8 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     // 已接收字节数
     private long receivedBytes;
 
-    public DataNodeHandler(String storagePath) {
-        this.storagePath = storagePath;
-    }
-
-    @Override
-    public void channelActive(ChannelHandlerContext ctx) throws Exception {
-        System.out.println("客户端(或Driver)已连接: " + ctx.channel().remoteAddress());
-        File storageDir = new File(storagePath);
-        if (!storageDir.exists()) {
-            storageDir.mkdirs();
-        }
+    public DataNodeHandler(List<String> storagePaths) {
+        this.storagePaths = storagePaths;
     }
 
     @Override
@@ -231,7 +224,11 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     /**
      * 根据 Hash (fileName) 获取存储路径
      * 规则: 1-2位为一级目录, 3-4位为二级目录
-     *
+     * 
+     * 多路径策略:
+     * 1. 如果文件已存在于任一路径，返回该路径的文件对象。
+     * 2. 如果文件不存在，选择剩余空间最大的路径。
+     * 
      * 安全修复: 增加路径遍历检查和文件名格式校验
      */
     private File getStorageFile(String hash) throws IOException {
@@ -244,23 +241,45 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             throw new IOException("非法的文件名/Hash检测 (包含非法字符): " + hash);
         }
 
-        File rootDir = new File(storagePath).getCanonicalFile();
+        // 路径计算逻辑
+        String dir1 = hash.length() >= 2 ? hash.substring(0, 2) : "00";
+        String dir2 = hash.length() >= 4 ? hash.substring(2, 4) : "00";
+        String relativePath = dir1 + File.separator + dir2;
 
-        // 防止 Hash 过短
-        if (hash.length() < 4) {
-            File target = new File(rootDir, hash);
-            validatePath(target, rootDir);
-            return target;
+        // 2. 检查文件是否已存在 (读优先)
+        for (String path : storagePaths) {
+            File rootDir = new File(path).getCanonicalFile();
+            File target = new File(rootDir, relativePath + File.separator + hash);
+            // 简单校验防止遍历
+            if (target.getCanonicalPath().startsWith(rootDir.getPath()) && target.exists()) {
+                 return target;
+            }
+        }
+        
+        // 3. 文件不存在，选择剩余空间最大的路径 (写策略)
+        String bestPath = null;
+        long maxFreeSpace = -1;
+        
+        for (String path : storagePaths) {
+            File root = new File(path);
+            if (!root.exists()) root.mkdirs();
+            long free = root.getFreeSpace();
+            if (free > maxFreeSpace) {
+                maxFreeSpace = free;
+                bestPath = path;
+            }
+        }
+        
+        if (bestPath == null) {
+            throw new IOException("没有可用的存储路径");
         }
 
-        String dir1 = hash.substring(0, 2);
-        String dir2 = hash.substring(2, 4);
-
-        File dir = new File(rootDir, dir1 + File.separator + dir2);
+        File rootDir = new File(bestPath).getCanonicalFile();
+        File dir = new File(rootDir, relativePath);
         if (!dir.exists()) {
             dir.mkdirs();
         }
-
+        
         File target = new File(dir, hash);
         validatePath(target, rootDir);
         return target;

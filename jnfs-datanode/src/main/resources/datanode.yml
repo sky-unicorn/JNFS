@@ -4,8 +4,9 @@ server:
   # advertised_host: 192.168.1.100
 
 storage:
-  # 存储路径
-  path: D:/data/jnfs/storage
+  # 支持配置多个存储路径，用于扩容
+  paths:
+    - D:/data/jnfs/storage
 
 # 注册中心配置
 registry:

@@ -18,6 +18,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -36,7 +38,7 @@ public class DataNodeServer {
 
     private final int port;
     private final String advertisedHost;
-    private final String storagePath;
+    private final List<String> storagePaths;
     private final String registryHost;
     private final int registryPort;
 
@@ -45,10 +47,10 @@ public class DataNodeServer {
     private Channel heartbeatChannel;
     private final AtomicBoolean isConnecting = new AtomicBoolean(false);
 
-    public DataNodeServer(int port, String advertisedHost, String storagePath, String registryHost, int registryPort) {
+    public DataNodeServer(int port, String advertisedHost, List<String> storagePaths, String registryHost, int registryPort) {
         this.port = port;
         this.advertisedHost = advertisedHost;
-        this.storagePath = storagePath;
+        this.storagePaths = storagePaths;
         this.registryHost = registryHost;
         this.registryPort = registryPort;
     }
@@ -72,7 +74,7 @@ public class DataNodeServer {
                  public void initChannel(SocketChannel ch) throws Exception {
                      ch.pipeline().addLast(new PacketDecoder());
                      ch.pipeline().addLast(new PacketEncoder());
-                     ch.pipeline().addLast(businessGroup, new DataNodeHandler(storagePath));
+                     ch.pipeline().addLast(businessGroup, new DataNodeHandler(storagePaths));
                  }
              })
              .option(ChannelOption.SO_BACKLOG, 4096)
@@ -83,7 +85,7 @@ public class DataNodeServer {
 
             ChannelFuture f = b.bind(port).sync();
             System.out.println("JNFS DataNode 启动成功 (Registry Mode)，端口: " + port);
-            System.out.println("存储目录: " + storagePath);
+            System.out.println("存储目录: " + storagePaths);
 
             f.channel().closeFuture().sync();
         } finally {
@@ -122,28 +124,30 @@ public class DataNodeServer {
     }
 
     private void cleanupTmpFiles() throws IOException {
-        Path root = Paths.get(storagePath);
-        if (!Files.exists(root)) {
-            return;
-        }
-
         long now = System.currentTimeMillis();
         // 过期时间：1 小时前的临时文件会被删除
         long expirationTime = 1 * 60 * 60 * 1000L;
 
-        Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                if (file.toString().endsWith(DataNodeHandler.TMP_SUFFIX)) {
-                    long lastModified = attrs.lastModifiedTime().toMillis();
-                    if (now - lastModified > expirationTime) {
-                        System.out.println("[GC] 删除过期临时文件: " + file);
-                        Files.delete(file);
-                    }
-                }
-                return FileVisitResult.CONTINUE;
+        for (String path : storagePaths) {
+            Path root = Paths.get(path);
+            if (!Files.exists(root)) {
+                continue;
             }
-        });
+
+            Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                    if (file.toString().endsWith(DataNodeHandler.TMP_SUFFIX)) {
+                        long lastModified = attrs.lastModifiedTime().toMillis();
+                        if (now - lastModified > expirationTime) {
+                            System.out.println("[GC] 删除过期临时文件: " + file);
+                            Files.delete(file);
+                        }
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        }
     }
 
     private void sendHeartbeatToRegistry() {
@@ -190,13 +194,16 @@ public class DataNodeServer {
     }
 
     private void doSendHeartbeat(Channel channel) {
-        File storeDir = new File(storagePath);
-        if (!storeDir.exists()) {
-            storeDir.mkdirs();
+        long totalFreeSpace = 0;
+        for (String path : storagePaths) {
+            File storeDir = new File(path);
+            if (!storeDir.exists()) {
+                storeDir.mkdirs();
+            }
+            totalFreeSpace += storeDir.getFreeSpace();
         }
-        long freeSpace = storeDir.getFreeSpace();
 
-        String payload = advertisedHost + ":" + port + "|" + freeSpace;
+        String payload = advertisedHost + ":" + port + "|" + totalFreeSpace;
 
         Packet packet = new Packet();
         packet.setCommandType(CommandType.REGISTRY_HEARTBEAT);
@@ -213,11 +220,21 @@ public class DataNodeServer {
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 8080);
         // 如果没有配置 advertised_host，则自动获取本机 IP
-        String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtils.getLocalIp());
+        String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtil.getLocalhostStr());
 
         Map<String, Object> storageConfig = (Map<String, Object>) config.get("storage");
-        String storagePath = (String) storageConfig.getOrDefault("path", "datanode_files");
-        storagePath = FileUtil.normalize(storagePath);
+        List<String> storagePaths = new ArrayList<>();
+        
+        if (storageConfig.containsKey("paths")) {
+            List<String> paths = (List<String>) storageConfig.get("paths");
+            for (String p : paths) {
+                storagePaths.add(FileUtil.normalize(p));
+            }
+        } else if (storageConfig.containsKey("path")) {
+            storagePaths.add(FileUtil.normalize((String) storageConfig.get("path")));
+        } else {
+            storagePaths.add("datanode_files");
+        }
 
         String regHost = "localhost";
         int regPort = 8000;
@@ -230,6 +247,6 @@ public class DataNodeServer {
         System.out.println("使用注册中心: " + regHost + ":" + regPort);
         System.out.println("对外广播地址: " + advertisedHost);
 
-        new DataNodeServer(port, advertisedHost, storagePath, regHost, regPort).run();
+        new DataNodeServer(port, advertisedHost, storagePaths, regHost, regPort).run();
     }
 }
