@@ -1,8 +1,8 @@
 server:
-  port: 8000
+  port: 5367
 
 dashboard:
-  port: 9527
+  port: 15367
 
 heartbeat:
   timeout_ms: 30000

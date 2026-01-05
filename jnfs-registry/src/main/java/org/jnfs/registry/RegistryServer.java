@@ -68,11 +68,11 @@ public class RegistryServer {
 
         // 读取服务器端口配置
         Map<String, Object> serverConfig = (Map<String, Object>) config.getOrDefault("server", Map.of());
-        int port = (int) serverConfig.getOrDefault("port", 8000);
+        int port = (int) serverConfig.getOrDefault("port", 5367);
 
         // 读取 Dashboard 端口配置
         Map<String, Object> dashboardConfig = (Map<String, Object>) config.getOrDefault("dashboard", Map.of());
-        int dashboardPort = (int) dashboardConfig.getOrDefault("port", 8081);
+        int dashboardPort = (int) dashboardConfig.getOrDefault("port", 15367);
 
         // 读取心跳超时配置
         Map<String, Object> heartbeatConfig = (Map<String, Object>) config.getOrDefault("heartbeat", Map.of());

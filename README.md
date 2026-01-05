@@ -59,19 +59,19 @@ mvn clean package -Pdist
    ```bash
    ./bin/start.sh registry
    ```
-   *默认端口: 8000*
+   *默认端口: 5367*
 
 2. **启动 NameNode**
    ```bash
    ./bin/start.sh namenode
    ```
-   *默认端口: 9090*
+   *默认端口: 5368*
 
 3. **启动 DataNode**
    ```bash
    ./bin/start.sh datanode
    ```
-   *默认端口: 8080*
+   *默认端口: 5369*
 
 4. **运行综合测试**
    ```bash
@@ -88,14 +88,14 @@ JNFS 提供了灵活的 Java SDK，支持**单点直连**和**集群发现**两�
 适用于开发测试或 NameNode 单点部署的场景。
 ```java
 // 直接连接指定的 NameNode IP 和端口
-JNFSDriver driver = new JNFSDriver("localhost", 9090);
+JNFSDriver driver = new JNFSDriver("localhost", 5368);
 ```
 
 **方式二：高可用模式 (推荐生产使用)**
 连接注册中心，自动发现可用的 NameNode 集群，支持负载均衡和故障转移。
 ```java
 // 连接 Registry，自动获取 NameNode 列表
-JNFSDriver driver = JNFSDriver.useRegistry("localhost", 8000);
+JNFSDriver driver = JNFSDriver.useRegistry("localhost", 5367);
 ```
 
 #### 完整代码示例
@@ -107,7 +107,7 @@ import java.io.File;
 public class Demo {
     public static void main(String[] args) throws Exception {
         // 1. 初始化 Driver (此处演示高可用模式)
-        JNFSDriver driver = JNFSDriver.useRegistry("localhost", 8000);
+        JNFSDriver driver = JNFSDriver.useRegistry("localhost", 5367);
 
         try {
             // 2. 上传文件
@@ -135,7 +135,7 @@ public class Demo {
 ### datanode.yml (DataNode 配置)
 ```yaml
 server:
-  port: 8080
+  port: 5369
   # 自动获取本机 IP，也可手动指定广播地址
   # advertised_host: 192.168.1.100
 
@@ -147,29 +147,30 @@ storage:
 
 registry:
   host: localhost
-  port: 8000
+  port: 5367
 ```
 
 ### namenode.yml (NameNode 配置)
 ```yaml
 server:
-  port: 9090
+  port: 5368
 
 registry:
   host: localhost
-  port: 8000
+  port: 5367
   
 # 元数据持久化配置 (支持 FILE 或 MYSQL)
 metadata:
   type: FILE 
+```
 
 ### registry.yml (Registry 配置)
 ```yaml
 server:
-  port: 8000
+  port: 5367
   
 dashboard:
-  port: 8081
+  port: 15367
 
 heartbeat:
   timeout_ms: 30000 # 心跳超时时间 (毫秒)

@@ -78,7 +78,7 @@ public class ExampleApp {
 
     // --- 1. 标准上传下载测试 ---
     private static void runStandardTest() {
-        JNFSDriver driver = new JNFSDriver("localhost", 9090);
+        JNFSDriver driver = new JNFSDriver("localhost", 5368);
         try {
             String filePath = "E:\\back-up\\backup.7z";
             File file = new File(filePath);
@@ -127,7 +127,7 @@ public class ExampleApp {
             }
         }
 
-        JNFSDriver driver = new JNFSDriver("localhost", 9090);
+        JNFSDriver driver = new JNFSDriver("localhost", 5368);
         int threads = 5;
         int requestsPerThread = 4;
         ExecutorService executor = Executors.newFixedThreadPool(threads);
@@ -183,7 +183,7 @@ public class ExampleApp {
                  }
              });
 
-            ChannelFuture f = b.connect("localhost", 8080).sync();
+            ChannelFuture f = b.connect("localhost", 5369).sync();
             Channel channel = f.channel();
 
             String maliciousName = "../../../malicious_file.txt";
@@ -220,7 +220,7 @@ public class ExampleApp {
                  }
              });
 
-            ChannelFuture f = b.connect("localhost", 8080).sync();
+            ChannelFuture f = b.connect("localhost", 5369).sync();
             Channel channel = f.channel();
 
             String hash = "ABCD1234LEAK";
@@ -296,7 +296,7 @@ public class ExampleApp {
                              });
                          }
                      });
-                    ChannelFuture f = b.connect("localhost", 9090).sync();
+                    ChannelFuture f = b.connect("localhost", 5368).sync();
                     Packet packet = new Packet();
                     packet.setCommandType(CommandType.NAMENODE_PRE_UPLOAD);
                     packet.setToken(CLIENT_TOKEN);

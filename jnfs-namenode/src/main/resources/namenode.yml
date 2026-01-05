@@ -1,10 +1,10 @@
 server:
-  port: 9090
+  port: 5368
 
 # 注册中心配置
 registry:
   host: localhost
-  port: 8000
+  port: 5367
 
 # 元数据存储配置
 metadata:

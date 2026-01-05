@@ -171,13 +171,13 @@ public class NameNodeServer {
         Map<String, Object> config = ConfigUtil.loadConfig("namenode.yml");
 
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
-        int port = (int) serverConfig.getOrDefault("port", 9090);
+        int port = (int) serverConfig.getOrDefault("port", 5368);
         // 如果没有配置 advertised_host，则自动获取本机 IP
         String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtils.getLocalIp());
 
         // 读取注册中心配置
         String regHost = "localhost";
-        int regPort = 8000;
+        int regPort = 5367;
         if (config.containsKey("registry")) {
             Map<String, Object> regConfig = (Map<String, Object>) config.get("registry");
             regHost = (String) regConfig.getOrDefault("host", "localhost");

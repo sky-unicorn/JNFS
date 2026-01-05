@@ -1,5 +1,5 @@
 server:
-  port: 8080
+  port: 5369
   # 对外广播的 IP 地址，默认为本机局域网 IP
   # advertised_host: 192.168.1.100
 
@@ -11,4 +11,4 @@ storage:
 # 注册中心配置
 registry:
   host: localhost
-  port: 8000
+  port: 5367
