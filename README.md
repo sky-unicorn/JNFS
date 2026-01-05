@@ -162,4 +162,16 @@ registry:
 # 元数据持久化配置 (支持 FILE 或 MYSQL)
 metadata:
   type: FILE 
+
+### registry.yml (Registry 配置)
+```yaml
+server:
+  port: 8000
+  
+dashboard:
+  port: 8081
+
+heartbeat:
+  timeout_ms: 30000 # 心跳超时时间 (毫秒)
+```
 ```

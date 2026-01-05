@@ -11,6 +11,9 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
 
+import org.jnfs.common.ConfigUtil;
+import java.util.Map;
+
 /**
  * 注册中心服务 (Standalone)
  * 负责 DataNode 的注册、心跳维护，以及向 NameNode 提供服务发现
@@ -59,9 +62,27 @@ public class RegistryServer {
         }
     }
 
+    @SuppressWarnings("unchecked")
     public static void main(String[] args) throws Exception {
-        int port = 8000; // 注册中心 RPC 端口
-        int dashboardPort = 8081; // Dashboard HTTP 端口
+        Map<String, Object> config = ConfigUtil.loadConfig("registry.yml");
+
+        // 读取服务器端口配置
+        Map<String, Object> serverConfig = (Map<String, Object>) config.getOrDefault("server", Map.of());
+        int port = (int) serverConfig.getOrDefault("port", 8000);
+
+        // 读取 Dashboard 端口配置
+        Map<String, Object> dashboardConfig = (Map<String, Object>) config.getOrDefault("dashboard", Map.of());
+        int dashboardPort = (int) dashboardConfig.getOrDefault("port", 8081);
+
+        // 读取心跳超时配置
+        Map<String, Object> heartbeatConfig = (Map<String, Object>) config.getOrDefault("heartbeat", Map.of());
+        int heartbeatTimeout = (int) heartbeatConfig.getOrDefault("timeout_ms", 30000);
+        
+        // 更新 Handler 中的超时设置
+        RegistryHandler.heartbeatTimeout = heartbeatTimeout;
+
+        System.out.println("启动注册中心 -> RPC Port: " + port + ", Dashboard Port: " + dashboardPort + ", Heartbeat Timeout: " + heartbeatTimeout + "ms");
+        
         new RegistryServer(port, dashboardPort).run();
     }
 }

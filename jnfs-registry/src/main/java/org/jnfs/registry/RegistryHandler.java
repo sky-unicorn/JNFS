@@ -41,7 +41,8 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     // NameNode 列表: address -> NodeInfo
     private static final Map<String, NodeInfo> nameNodes = new ConcurrentHashMap<>();
     
-    private static final long HEARTBEAT_TIMEOUT = 30 * 1000;
+    // 心跳超时时间 (默认30秒)，可由 RegistryServer 启动时修改
+    public static volatile long heartbeatTimeout = 30 * 1000;
 
     // 主动清理过期节点的定时任务
     private static final ScheduledExecutorService cleanerExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -57,14 +58,14 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
                 long now = System.currentTimeMillis();
                 
                 int dnInit = dataNodes.size();
-                dataNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > HEARTBEAT_TIMEOUT);
+                dataNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > heartbeatTimeout);
                 int dnFinal = dataNodes.size();
                 if (dnInit != dnFinal) {
                     System.out.println("[Registry-Cleaner] 清理了 " + (dnInit - dnFinal) + " 个过期 DataNode");
                 }
                 
                 int nnInit = nameNodes.size();
-                nameNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > HEARTBEAT_TIMEOUT);
+                nameNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > heartbeatTimeout);
                 int nnFinal = nameNodes.size();
                 if (nnInit != nnFinal) {
                     System.out.println("[Registry-Cleaner] 清理了 " + (nnInit - nnFinal) + " 个过期 NameNode");
@@ -156,7 +157,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         long now = System.currentTimeMillis();
         List<String> activeNodes = new ArrayList<>();
         
-        dataNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > HEARTBEAT_TIMEOUT);
+        dataNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > heartbeatTimeout);
         
         for (Map.Entry<String, NodeInfo> entry : dataNodes.entrySet()) {
             activeNodes.add(entry.getKey() + "|" + entry.getValue().freeSpace);
@@ -170,7 +171,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         long now = System.currentTimeMillis();
         List<String> activeNodes = new ArrayList<>();
         
-        nameNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > HEARTBEAT_TIMEOUT);
+        nameNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > heartbeatTimeout);
         
         for (String address : nameNodes.keySet()) {
             activeNodes.add(address);

@@ -1,0 +1,8 @@
+server:
+  port: 8000
+
+dashboard:
+  port: 9527
+
+heartbeat:
+  timeout_ms: 30000
