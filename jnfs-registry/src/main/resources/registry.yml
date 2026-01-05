@@ -1,8 +1,16 @@
+# --- 注册中心服务配置 ---
 server:
+  # RPC 服务监听端口 (默认: 5367)
   port: 5367
 
+# --- 监控 Dashboard 配置 ---
 dashboard:
+  # Web 监控页面端口 (默认: 15367)
+  # 访问地址: http://localhost:15367
   port: 15367
 
+# --- 心跳检测配置 ---
 heartbeat:
+  # 节点心跳超时时间 (单位: 毫秒)
+  # 超过此时间未收到心跳，将自动剔除 DataNode/NameNode
   timeout_ms: 30000
