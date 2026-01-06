@@ -41,8 +41,6 @@ public class DataNodeServer {
 
     // 心跳专用的 EventLoopGroup，避免每次创建销毁
     private final EventLoopGroup heartbeatGroup = new NioEventLoopGroup(1);
-    private Channel heartbeatChannel;
-    private final AtomicBoolean isConnecting = new AtomicBoolean(false);
 
     public DataNodeServer(int port, String advertisedHost, List<String> storagePaths, List<InetSocketAddress> registryAddresses) {
         this.port = port;
