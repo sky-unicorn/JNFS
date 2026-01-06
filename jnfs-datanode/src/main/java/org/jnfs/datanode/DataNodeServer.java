@@ -3,11 +3,9 @@ package org.jnfs.datanode;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.net.NetUtil;
 import io.netty.bootstrap.Bootstrap;
-import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
-import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
@@ -37,8 +35,6 @@ import java.util.List;
  */
 public class DataNodeServer {
 
-    private static final String VALID_TOKEN = "jnfs-secure-token-2025";
-
     private final int port;
     private final String advertisedHost;
     private final List<String> storagePaths;
@@ -63,36 +59,12 @@ public class DataNodeServer {
         // 启动垃圾回收线程
         startGarbageCollectorThread();
 
-        EventLoopGroup bossGroup = new NioEventLoopGroup(1);
-        EventLoopGroup workerGroup = new NioEventLoopGroup();
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(32);
-
+        
         try {
-            ServerBootstrap b = new ServerBootstrap();
-            b.group(bossGroup, workerGroup)
-             .channel(NioServerSocketChannel.class)
-             .childHandler(new ChannelInitializer<SocketChannel>() {
-                 @Override
-                 public void initChannel(SocketChannel ch) throws Exception {
-                     ch.pipeline().addLast(new PacketDecoder());
-                     ch.pipeline().addLast(new PacketEncoder());
-                     ch.pipeline().addLast(businessGroup, new DataNodeHandler(storagePaths));
-                 }
-             })
-             .option(ChannelOption.SO_BACKLOG, 4096)
-             .childOption(ChannelOption.SO_KEEPALIVE, true)
-             .childOption(ChannelOption.TCP_NODELAY, true)
-             .childOption(ChannelOption.SO_RCVBUF, 1024 * 1024)
-             .childOption(ChannelOption.SO_SNDBUF, 1024 * 1024);
-
-            ChannelFuture f = b.bind(port).sync();
-            System.out.println("JNFS DataNode 启动成功 (Registry Mode)，端口: " + port);
-            System.out.println("存储目录: " + storagePaths);
-
-            f.channel().closeFuture().sync();
+            // 使用 NettyServerUtils 启动服务
+            NettyServerUtils.start("DataNode", port, new DataNodeHandler(storagePaths), businessGroup);
         } finally {
-            workerGroup.shutdownGracefully();
-            bossGroup.shutdownGracefully();
             businessGroup.shutdownGracefully();
             heartbeatGroup.shutdownGracefully();
         }
@@ -212,7 +184,7 @@ public class DataNodeServer {
 
         Packet packet = new Packet();
         packet.setCommandType(CommandType.REGISTRY_HEARTBEAT);
-        packet.setToken(VALID_TOKEN);
+        packet.setToken(Constants.VALID_TOKEN);
         packet.setData(payload.getBytes(StandardCharsets.UTF_8));
 
         channel.writeAndFlush(packet);
@@ -241,48 +213,11 @@ public class DataNodeServer {
             storagePaths.add("datanode_files");
         }
 
-        String regHost = "localhost";
-        int regPort = 5367;
-        List<InetSocketAddress> registryAddresses = new ArrayList<>();
-        
-        if (config.containsKey("registry")) {
-            Map<String, Object> regConfig = (Map<String, Object>) config.get("registry");
-            // 优先检查 'addresses' 或 'address'
-            Object addressesObj = regConfig.get("addresses");
-            if (addressesObj instanceof List) {
-                List<String> addrList = (List<String>) addressesObj;
-                for (String addr : addrList) {
-                    parseAndAddAddress(addr, registryAddresses);
-                }
-            } else if (addressesObj instanceof String) {
-                String[] addrs = ((String) addressesObj).split(",");
-                for (String addr : addrs) {
-                    parseAndAddAddress(addr, registryAddresses);
-                }
-            } else {
-                // 兼容旧配置
-                regHost = (String) regConfig.getOrDefault("host", "localhost");
-                regPort = (int) regConfig.getOrDefault("port", 5367);
-                registryAddresses.add(new InetSocketAddress(regHost, regPort));
-            }
-        } else {
-            registryAddresses.add(new InetSocketAddress(regHost, regPort));
-        }
+        List<InetSocketAddress> registryAddresses = ConfigUtil.parseRegistryAddresses(config);
 
         System.out.println("使用注册中心集群: " + registryAddresses);
         System.out.println("对外广播地址: " + advertisedHost);
 
         new DataNodeServer(port, advertisedHost, storagePaths, registryAddresses).run();
-    }
-    
-    private static void parseAndAddAddress(String addr, List<InetSocketAddress> list) {
-        try {
-            String[] parts = addr.trim().split(":");
-            if (parts.length == 2) {
-                list.add(new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
-            }
-        } catch (Exception e) {
-            System.err.println("解析注册中心地址失败: " + addr);
-        }
     }
 }

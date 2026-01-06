@@ -3,8 +3,11 @@ package org.jnfs.common;
 import org.yaml.snakeyaml.Yaml;
 
 import java.io.InputStream;
+import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -40,6 +43,58 @@ public class ConfigUtil {
             return yaml.load(in);
         } catch (Exception e) {
             throw new RuntimeException("加载配置文件失败: " + fileName, e);
+        }
+    }
+
+    /**
+     * 解析注册中心地址配置
+     * 支持 List<String> 或逗号分隔的 String，兼容旧版 host/port 配置
+     */
+    @SuppressWarnings("unchecked")
+    public static List<InetSocketAddress> parseRegistryAddresses(Map<String, Object> config) {
+        List<InetSocketAddress> registryAddresses = new ArrayList<>();
+        String defaultHost = "localhost";
+        int defaultPort = 5367;
+
+        if (config != null && config.containsKey("registry")) {
+            Map<String, Object> regConfig = (Map<String, Object>) config.get("registry");
+            // 优先检查 'addresses' 或 'address'
+            Object addressesObj = regConfig.get("addresses");
+            if (addressesObj == null) {
+                 addressesObj = regConfig.get("address");
+            }
+            
+            if (addressesObj instanceof List) {
+                List<String> addrList = (List<String>) addressesObj;
+                for (String addr : addrList) {
+                    parseAndAddAddress(addr, registryAddresses);
+                }
+            } else if (addressesObj instanceof String) {
+                String[] addrs = ((String) addressesObj).split(",");
+                for (String addr : addrs) {
+                    parseAndAddAddress(addr, registryAddresses);
+                }
+            } else {
+                // 兼容旧配置
+                String host = (String) regConfig.getOrDefault("host", defaultHost);
+                int port = (int) regConfig.getOrDefault("port", defaultPort);
+                registryAddresses.add(new InetSocketAddress(host, port));
+            }
+        } else {
+            registryAddresses.add(new InetSocketAddress(defaultHost, defaultPort));
+        }
+        
+        return registryAddresses;
+    }
+
+    private static void parseAndAddAddress(String addr, List<InetSocketAddress> list) {
+        try {
+            String[] parts = addr.trim().split(":");
+            if (parts.length == 2) {
+                list.add(new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
+            }
+        } catch (Exception e) {
+            System.err.println("解析注册中心地址失败: " + addr);
         }
     }
 }
