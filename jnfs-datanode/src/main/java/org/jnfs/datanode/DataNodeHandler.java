@@ -12,14 +12,13 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-import java.util.UUID;
-
 import java.util.List;
+import java.util.UUID;
 
 /**
  * DataNode 业务处理器
  * 处理文件上传和下载的数据流
- * 
+ *
  * 升级：支持断点续传/垃圾回收，上传时先写 .tmp 文件
  */
 public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
@@ -30,7 +29,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     public static final String TMP_SUFFIX = ".tmp";
 
     private final List<String> storagePaths;
-    
+
     // 当前正在接收的文件写入通道
     private FileChannel currentFileChannel;
     // 当前文件输出流
@@ -138,7 +137,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
     private void finishUpload(ChannelHandlerContext ctx) {
         closeCurrentFile();
-        
+
         // 重命名 .tmp -> 正式文件
         File finalFile;
         try {
@@ -175,15 +174,15 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
                 } else {
                     System.err.println("重命名临时文件失败: " + currentTmpFile.getAbsolutePath());
                     // 尝试手动删除失败的 tmp
-                    currentTmpFile.delete(); 
+                    currentTmpFile.delete();
                     sendResponse(ctx, CommandType.ERROR, "文件存储失败(重命名错误)".getBytes(StandardCharsets.UTF_8));
                 }
             }
         }
-        
+
         resetState();
     }
-    
+
     private void resetState() {
         currentFileName = null;
         currentTmpFile = null;
@@ -224,11 +223,11 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     /**
      * 根据 Hash (fileName) 获取存储路径
      * 规则: 1-2位为一级目录, 3-4位为二级目录
-     * 
+     *
      * 多路径策略:
      * 1. 如果文件已存在于任一路径，返回该路径的文件对象。
      * 2. 如果文件不存在，选择剩余空间最大的路径。
-     * 
+     *
      * 安全修复: 增加路径遍历检查和文件名格式校验
      */
     private File getStorageFile(String hash) throws IOException {
@@ -255,11 +254,11 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
                  return target;
             }
         }
-        
+
         // 3. 文件不存在，选择剩余空间最大的路径 (写策略)
         String bestPath = null;
         long maxFreeSpace = -1;
-        
+
         for (String path : storagePaths) {
             File root = new File(path);
             if (!root.exists()) root.mkdirs();
@@ -269,7 +268,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
                 bestPath = path;
             }
         }
-        
+
         if (bestPath == null) {
             throw new IOException("没有可用的存储路径");
         }
@@ -279,7 +278,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         if (!dir.exists()) {
             dir.mkdirs();
         }
-        
+
         File target = new File(dir, hash);
         validatePath(target, rootDir);
         return target;

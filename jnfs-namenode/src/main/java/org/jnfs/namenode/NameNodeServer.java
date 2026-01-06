@@ -9,13 +9,11 @@ import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
 import org.jnfs.common.*;
 
-import java.nio.charset.StandardCharsets;
 import java.net.InetSocketAddress;
-import java.util.ArrayList;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Arrays;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -46,7 +44,7 @@ public class NameNodeServer {
         startRegistrationHeartbeatThread();
 
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(16);
-        
+
         // 使用 NettyServerUtils 启动服务
         NettyServerUtils.start("NameNode", port, new NameNodeHandler(), businessGroup);
     }
@@ -76,18 +74,18 @@ public class NameNodeServer {
                          ch.pipeline().addLast(new PacketEncoder());
                      }
                  });
-    
+
                 // 快速连接超时，避免阻塞
                 ChannelFuture f = b.connect(addr).sync();
                 Channel channel = f.channel();
-    
+
                 String payload = advertisedHost + ":" + port;
-                
+
                 Packet packet = new Packet();
                 packet.setCommandType(CommandType.REGISTRY_HEARTBEAT_NAMENODE);
                 packet.setToken(Constants.VALID_TOKEN);
                 packet.setData(payload.getBytes(StandardCharsets.UTF_8));
-                
+
                 channel.writeAndFlush(packet).sync();
                 channel.close().sync();
             } catch (Exception e) {
@@ -126,17 +124,17 @@ public class NameNodeServer {
                          ch.pipeline().addLast(handler);
                      }
                  });
-    
+
                 ChannelFuture f = b.connect(addr).sync();
                 Channel channel = f.channel();
-    
+
                 Packet request = new Packet();
                 request.setCommandType(CommandType.REGISTRY_GET_DATANODES);
                 request.setToken(Constants.VALID_TOKEN);
                 channel.writeAndFlush(request);
-    
+
                 f.channel().closeFuture().sync();
-                
+
                 // 如果成功获取数据，直接返回，不再尝试下一个
                 return;
             } catch (Exception e) {
@@ -192,7 +190,7 @@ public class NameNodeServer {
 
         new NameNodeServer(port, advertisedHost, registryAddresses).run();
     }
-    
+
     // --- 内部 Discovery Handler ---
     private static class DiscoveryHandler extends SimpleChannelInboundHandler<Packet> {
         @Override

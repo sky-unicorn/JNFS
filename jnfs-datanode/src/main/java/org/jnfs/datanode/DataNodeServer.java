@@ -13,6 +13,7 @@ import org.jnfs.common.*;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -23,9 +24,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import java.net.InetSocketAddress;
-import java.util.List;
 
 /**
  * DataNode 服务启动类
@@ -60,7 +58,7 @@ public class DataNodeServer {
         startGarbageCollectorThread();
 
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(32);
-        
+
         try {
             // 使用 NettyServerUtils 启动服务
             NettyServerUtils.start("DataNode", port, new DataNodeHandler(storagePaths), businessGroup);
@@ -134,7 +132,7 @@ public class DataNodeServer {
     private void doSendHeartbeatToSingleRegistry(InetSocketAddress registryAddr) {
         // DataNode 的心跳逻辑目前比较简单，每次都新建连接发送 (短连接)
         // 或者维护一个 Map<Address, Channel> 实现长连接。这里为了简化修改，使用短连接广播。
-        
+
         EventLoopGroup group = new NioEventLoopGroup();
         try {
             Bootstrap b = new Bootstrap();
@@ -152,7 +150,7 @@ public class DataNodeServer {
                      });
                  }
              });
-    
+
             // 快速超时
             b.connect(registryAddr).addListener((ChannelFuture future) -> {
                 if (future.isSuccess()) {
@@ -164,7 +162,7 @@ public class DataNodeServer {
                 }
                 group.shutdownGracefully();
             });
-            
+
         } catch (Exception e) {
             group.shutdownGracefully();
         }
@@ -201,7 +199,7 @@ public class DataNodeServer {
 
         Map<String, Object> storageConfig = (Map<String, Object>) config.get("storage");
         List<String> storagePaths = new ArrayList<>();
-        
+
         if (storageConfig.containsKey("paths")) {
             List<String> paths = (List<String>) storageConfig.get("paths");
             for (String p : paths) {

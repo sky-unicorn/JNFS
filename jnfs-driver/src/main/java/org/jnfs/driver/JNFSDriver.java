@@ -20,15 +20,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -44,7 +38,7 @@ public class JNFSDriver {
     // Registry 地址列表 (用于集群/高可用)
     private final List<InetSocketAddress> registryAddresses = new CopyOnWriteArrayList<>();
     private final boolean useRegistry;
-    
+
     private final EventLoopGroup group;
 
     // NameNode 列表 (Registry 模式下使用)
@@ -68,7 +62,7 @@ public class JNFSDriver {
     public static JNFSDriver useRegistry(String registryAddresses) {
         return new JNFSDriver(null, 0, registryAddresses);
     }
-    
+
     /**
      * 兼容旧版 API：单点注册中心
      */
@@ -78,7 +72,7 @@ public class JNFSDriver {
 
     private JNFSDriver(String nameNodeHost, int nameNodePort, String registryAddrStr) {
         this.useRegistry = (registryAddrStr != null);
-        
+
         if (useRegistry) {
             String[] addrs = registryAddrStr.split(",");
             for (String addr : addrs) {
@@ -91,7 +85,7 @@ public class JNFSDriver {
                 throw new IllegalArgumentException("无效的注册中心地址: " + registryAddrStr);
             }
         }
-        
+
         this.group = new NioEventLoopGroup();
 
         // 初始化连接池
@@ -108,7 +102,7 @@ public class JNFSDriver {
                 return new FixedChannelPool(b.remoteAddress(key), new NameNodeChannelPoolHandler(), 10);
             }
         };
-        
+
         if (useRegistry) {
             refreshNameNodes();
             startNameNodeRefreshThread();
@@ -117,7 +111,7 @@ public class JNFSDriver {
             nameNodes.add(new InetSocketAddress(nameNodeHost, nameNodePort));
         }
     }
-    
+
     private void startNameNodeRefreshThread() {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "Driver-Refresh");
@@ -132,7 +126,7 @@ public class JNFSDriver {
         for (InetSocketAddress registryAddr : registryAddresses) {
             Bootstrap b = new Bootstrap();
             RegistryDiscoveryHandler handler = new RegistryDiscoveryHandler();
-            
+
             b.group(group)
              .channel(NioSocketChannel.class)
              .handler(new ChannelInitializer<SocketChannel>() {
@@ -143,19 +137,19 @@ public class JNFSDriver {
                      ch.pipeline().addLast(handler);
                  }
              });
-    
+
             try {
                 // 连接当前 Registry
                 ChannelFuture f = b.connect(registryAddr).sync();
                 Channel channel = f.channel();
-    
+
                 Packet request = new Packet();
                 request.setCommandType(CommandType.REGISTRY_GET_NAMENODES);
                 request.setToken(CLIENT_TOKEN);
                 channel.writeAndFlush(request);
-    
+
                 f.channel().closeFuture().sync();
-                
+
                 List<String> nodes = handler.getNodes();
                 if (nodes != null) {
                     // 即使列表为空也可能是正常的(刚启动)，但只要通信成功就算成功
@@ -267,7 +261,7 @@ public class JNFSDriver {
         // 使用 Hutool 标准化路径 (处理分隔符、..、重复斜杠等)
         String normalizedPath = FileUtil.normalize(targetPath);
         File destination = new File(normalizedPath);
-        
+
         // 判断是否为目录：
         // 1. 原始路径以分隔符结尾 (Hutool normalize 会去掉末尾分隔符，所以要用 targetPath 判断)
         // 2. 或者 destination 已存在且是目录
@@ -439,7 +433,7 @@ public class JNFSDriver {
         while (attempts < maxAttempts) {
             int index = nextNameNodeIndex.getAndIncrement();
             InetSocketAddress address = nameNodes.get(Math.abs(index % nameNodes.size()));
-            
+
             try {
                 return doSendRequest(address, type, data);
             } catch (Exception e) {
@@ -453,7 +447,7 @@ public class JNFSDriver {
 
     private Packet doSendRequest(InetSocketAddress address, CommandType type, byte[] data) throws Exception {
         SimpleChannelPool pool = poolMap.get(address);
-        
+
         Future<Channel> future = pool.acquire();
         // 设置连接超时，防止卡死
         if (!future.await(3000)) {
@@ -462,9 +456,9 @@ public class JNFSDriver {
         if (!future.isSuccess()) {
             throw new IOException("无法连接 NameNode", future.cause());
         }
-        
+
         Channel channel = future.getNow();
-        
+
         SyncHandler handler = new SyncHandler();
         try {
             if (channel.pipeline().get("syncHandler") != null) {
@@ -472,14 +466,14 @@ public class JNFSDriver {
             }
 
             channel.pipeline().addLast("syncHandler", handler);
-            
+
             Packet packet = new Packet();
             packet.setCommandType(type);
             packet.setToken(CLIENT_TOKEN);
             packet.setData(data);
-            
+
             channel.writeAndFlush(packet);
-            
+
             return handler.getResponse();
         } finally {
             try {
@@ -520,7 +514,7 @@ public class JNFSDriver {
 
     private static class RegistryDiscoveryHandler extends SimpleChannelInboundHandler<Packet> {
         private final List<String> nodes = new CopyOnWriteArrayList<>();
-        
+
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, Packet packet) {
             if (packet.getCommandType() == CommandType.REGISTRY_RESPONSE_NAMENODES) {
@@ -534,11 +528,11 @@ public class JNFSDriver {
             }
             ctx.close();
         }
-        
+
         public List<String> getNodes() {
             return nodes;
         }
-        
+
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             ctx.close();
