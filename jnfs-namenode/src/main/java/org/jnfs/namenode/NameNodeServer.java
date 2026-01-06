@@ -12,8 +12,12 @@ import io.netty.util.concurrent.EventExecutorGroup;
 import org.jnfs.common.*;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
+import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.Arrays;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -30,14 +34,13 @@ public class NameNodeServer {
 
     private final int port;
     private final String advertisedHost;
-    private final String registryHost;
-    private final int registryPort;
+    // 支持多个注册中心地址
+    private final List<InetSocketAddress> registryAddresses;
 
-    public NameNodeServer(int port, String advertisedHost, String registryHost, int registryPort) {
+    public NameNodeServer(int port, String advertisedHost, List<InetSocketAddress> registryAddresses) {
         this.port = port;
         this.advertisedHost = advertisedHost;
-        this.registryHost = registryHost;
-        this.registryPort = registryPort;
+        this.registryAddresses = registryAddresses;
     }
 
     public void run() throws Exception {
@@ -91,34 +94,38 @@ public class NameNodeServer {
     }
 
     private void sendHeartbeatToRegistry() {
-        EventLoopGroup group = new NioEventLoopGroup();
-        try {
-            Bootstrap b = new Bootstrap();
-            b.group(group)
-             .channel(NioSocketChannel.class)
-             .handler(new ChannelInitializer<SocketChannel>() {
-                 @Override
-                 protected void initChannel(SocketChannel ch) {
-                     ch.pipeline().addLast(new PacketEncoder());
-                 }
-             });
-
-            ChannelFuture f = b.connect(registryHost, registryPort).sync();
-            Channel channel = f.channel();
-
-            String payload = advertisedHost + ":" + port;
-            
-            Packet packet = new Packet();
-            packet.setCommandType(CommandType.REGISTRY_HEARTBEAT_NAMENODE);
-            packet.setToken(VALID_TOKEN);
-            packet.setData(payload.getBytes(StandardCharsets.UTF_8));
-            
-            channel.writeAndFlush(packet).sync();
-            channel.close().sync();
-        } catch (Exception e) {
-            // System.err.println("注册/心跳失败: " + e.getMessage());
-        } finally {
-            group.shutdownGracefully();
+        // 向所有配置的 Registry 发送心跳 (广播模式，确保所有节点都收到)
+        for (InetSocketAddress addr : registryAddresses) {
+            EventLoopGroup group = new NioEventLoopGroup();
+            try {
+                Bootstrap b = new Bootstrap();
+                b.group(group)
+                 .channel(NioSocketChannel.class)
+                 .handler(new ChannelInitializer<SocketChannel>() {
+                     @Override
+                     protected void initChannel(SocketChannel ch) {
+                         ch.pipeline().addLast(new PacketEncoder());
+                     }
+                 });
+    
+                // 快速连接超时，避免阻塞
+                ChannelFuture f = b.connect(addr).sync();
+                Channel channel = f.channel();
+    
+                String payload = advertisedHost + ":" + port;
+                
+                Packet packet = new Packet();
+                packet.setCommandType(CommandType.REGISTRY_HEARTBEAT_NAMENODE);
+                packet.setToken(VALID_TOKEN);
+                packet.setData(payload.getBytes(StandardCharsets.UTF_8));
+                
+                channel.writeAndFlush(packet).sync();
+                channel.close().sync();
+            } catch (Exception e) {
+                // System.err.println("注册/心跳失败 (" + addr + "): " + e.getMessage());
+            } finally {
+                group.shutdownGracefully();
+            }
         }
     }
 
@@ -134,35 +141,40 @@ public class NameNodeServer {
     }
 
     private void fetchDataNodesFromRegistry() {
-        EventLoopGroup group = new NioEventLoopGroup();
-        try {
-            Bootstrap b = new Bootstrap();
-            DiscoveryHandler handler = new DiscoveryHandler();
-            b.group(group)
-             .channel(NioSocketChannel.class)
-             .handler(new ChannelInitializer<SocketChannel>() {
-                 @Override
-                 protected void initChannel(SocketChannel ch) {
-                     ch.pipeline().addLast(new PacketDecoder());
-                     ch.pipeline().addLast(new PacketEncoder());
-                     ch.pipeline().addLast(handler);
-                 }
-             });
-
-            ChannelFuture f = b.connect(registryHost, registryPort).sync();
-            Channel channel = f.channel();
-
-            Packet request = new Packet();
-            request.setCommandType(CommandType.REGISTRY_GET_DATANODES);
-            request.setToken(VALID_TOKEN);
-            channel.writeAndFlush(request);
-
-            f.channel().closeFuture().sync();
-        } catch (Exception e) {
-            // e.printStackTrace();
-            System.err.println("连接注册中心失败: " + e.getMessage());
-        } finally {
-            group.shutdownGracefully();
+        // 尝试从任一 Registry 获取 DataNode 列表 (Failover 模式)
+        for (InetSocketAddress addr : registryAddresses) {
+            EventLoopGroup group = new NioEventLoopGroup();
+            try {
+                Bootstrap b = new Bootstrap();
+                DiscoveryHandler handler = new DiscoveryHandler();
+                b.group(group)
+                 .channel(NioSocketChannel.class)
+                 .handler(new ChannelInitializer<SocketChannel>() {
+                     @Override
+                     protected void initChannel(SocketChannel ch) {
+                         ch.pipeline().addLast(new PacketDecoder());
+                         ch.pipeline().addLast(new PacketEncoder());
+                         ch.pipeline().addLast(handler);
+                     }
+                 });
+    
+                ChannelFuture f = b.connect(addr).sync();
+                Channel channel = f.channel();
+    
+                Packet request = new Packet();
+                request.setCommandType(CommandType.REGISTRY_GET_DATANODES);
+                request.setToken(VALID_TOKEN);
+                channel.writeAndFlush(request);
+    
+                f.channel().closeFuture().sync();
+                
+                // 如果成功获取数据，直接返回，不再尝试下一个
+                return;
+            } catch (Exception e) {
+                // System.err.println("连接注册中心失败 (" + addr + "): " + e.getMessage());
+            } finally {
+                group.shutdownGracefully();
+            }
         }
     }
 
@@ -175,16 +187,36 @@ public class NameNodeServer {
         // 如果没有配置 advertised_host，则自动获取本机 IP
         String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtils.getLocalIp());
 
-        // 读取注册中心配置
+        // 读取注册中心配置 (支持逗号分隔的多个地址)
+        List<InetSocketAddress> registryAddresses = new ArrayList<>();
         String regHost = "localhost";
         int regPort = 5367;
+        
         if (config.containsKey("registry")) {
             Map<String, Object> regConfig = (Map<String, Object>) config.get("registry");
-            regHost = (String) regConfig.getOrDefault("host", "localhost");
-            regPort = (int) regConfig.getOrDefault("port", 8000);
+            // 优先检查 'addresses' (list) 或 'address' (string, comma-separated)
+            Object addressesObj = regConfig.get("addresses");
+            if (addressesObj instanceof List) {
+                List<String> addrList = (List<String>) addressesObj;
+                for (String addr : addrList) {
+                    parseAndAddAddress(addr, registryAddresses);
+                }
+            } else if (addressesObj instanceof String) {
+                String[] addrs = ((String) addressesObj).split(",");
+                for (String addr : addrs) {
+                    parseAndAddAddress(addr, registryAddresses);
+                }
+            } else {
+                // 兼容旧配置 host/port
+                regHost = (String) regConfig.getOrDefault("host", "localhost");
+                regPort = (int) regConfig.getOrDefault("port", 5367);
+                registryAddresses.add(new InetSocketAddress(regHost, regPort));
+            }
+        } else {
+            registryAddresses.add(new InetSocketAddress(regHost, regPort));
         }
 
-        System.out.println("使用注册中心: " + regHost + ":" + regPort);
+        System.out.println("使用注册中心集群: " + registryAddresses);
         System.out.println("对外广播地址: " + advertisedHost);
 
         // --- 初始化 MetadataManager ---
@@ -215,7 +247,18 @@ public class NameNodeServer {
         // 注入到 Handler
         NameNodeHandler.initMetadataManager(metadataManager);
 
-        new NameNodeServer(port, advertisedHost, regHost, regPort).run();
+        new NameNodeServer(port, advertisedHost, registryAddresses).run();
+    }
+    
+    private static void parseAndAddAddress(String addr, List<InetSocketAddress> list) {
+        try {
+            String[] parts = addr.trim().split(":");
+            if (parts.length == 2) {
+                list.add(new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
+            }
+        } catch (Exception e) {
+            System.err.println("解析注册中心地址失败: " + addr);
+        }
     }
 
     // --- 内部 Discovery Handler ---

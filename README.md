@@ -95,7 +95,7 @@ JNFSDriver driver = new JNFSDriver("localhost", 5368);
 连接注册中心，自动发现可用的 NameNode 集群，支持负载均衡和故障转移。
 ```java
 // 连接 Registry，自动获取 NameNode 列表
-JNFSDriver driver = JNFSDriver.useRegistry("localhost", 5367);
+JNFSDriver driver = JNFSDriver.useRegistry("localhost:5367,localhost:5368");
 ```
 
 #### 完整代码示例
@@ -107,7 +107,7 @@ import java.io.File;
 public class Demo {
     public static void main(String[] args) throws Exception {
         // 1. 初始化 Driver (此处演示高可用模式)
-        JNFSDriver driver = JNFSDriver.useRegistry("localhost", 5367);
+        JNFSDriver driver = JNFSDriver.useRegistry("localhost:5367");
 
         try {
             // 2. 上传文件
@@ -146,8 +146,12 @@ storage:
     - D:/data/jnfs/storage2
 
 registry:
-  host: localhost
-  port: 5367
+  # 方式 1: 单点配置
+  # host: localhost
+  # port: 5367
+  
+  # 方式 2: 集群配置 (推荐)
+  addresses: localhost:5367,localhost:5368
 ```
 
 ### namenode.yml (NameNode 配置)
@@ -156,8 +160,12 @@ server:
   port: 5368
 
 registry:
-  host: localhost
-  port: 5367
+  # 方式 1: 单点配置
+  # host: localhost
+  # port: 5367
+  
+  # 方式 2: 集群配置 (推荐)
+  addresses: localhost:5367,localhost:5368
   
 # 元数据持久化配置 (支持 FILE 或 MYSQL)
 metadata:

@@ -6,8 +6,13 @@ server:
 # --- 注册中心连接配置 ---
 # NameNode 启动时会将自己注册到此地址，供客户端发现
 registry:
-  host: localhost
-  port: 5367
+  # 方式 1: 单点配置 (兼容旧版)
+  # host: localhost
+  # port: 5367
+  
+  # 方式 2: 集群配置 (推荐)
+  # 支持逗号分隔的字符串或列表格式
+  addresses: localhost:5367
 
 # --- 元数据存储配置 ---
 metadata:

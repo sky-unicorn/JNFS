@@ -26,6 +26,9 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import java.net.InetSocketAddress;
+import java.util.List;
+
 /**
  * DataNode 服务启动类
  * 负责实际的文件存储
@@ -39,20 +42,19 @@ public class DataNodeServer {
     private final int port;
     private final String advertisedHost;
     private final List<String> storagePaths;
-    private final String registryHost;
-    private final int registryPort;
+    // 支持多个注册中心地址
+    private final List<InetSocketAddress> registryAddresses;
 
     // 心跳专用的 EventLoopGroup，避免每次创建销毁
     private final EventLoopGroup heartbeatGroup = new NioEventLoopGroup(1);
     private Channel heartbeatChannel;
     private final AtomicBoolean isConnecting = new AtomicBoolean(false);
 
-    public DataNodeServer(int port, String advertisedHost, List<String> storagePaths, String registryHost, int registryPort) {
+    public DataNodeServer(int port, String advertisedHost, List<String> storagePaths, List<InetSocketAddress> registryAddresses) {
         this.port = port;
         this.advertisedHost = advertisedHost;
         this.storagePaths = storagePaths;
-        this.registryHost = registryHost;
-        this.registryPort = registryPort;
+        this.registryAddresses = registryAddresses;
     }
 
     public void run() throws Exception {
@@ -151,46 +153,49 @@ public class DataNodeServer {
     }
 
     private void sendHeartbeatToRegistry() {
-        // 如果连接已建立且活跃，直接发送
-        if (heartbeatChannel != null && heartbeatChannel.isActive()) {
-            doSendHeartbeat(heartbeatChannel);
-            return;
+        // 向所有配置的 Registry 发送心跳 (广播模式)
+        for (InetSocketAddress addr : registryAddresses) {
+            doSendHeartbeatToSingleRegistry(addr);
         }
+    }
 
-        // 如果正在重连中，跳过本次
-        if (isConnecting.get()) {
-            return;
+    private void doSendHeartbeatToSingleRegistry(InetSocketAddress registryAddr) {
+        // DataNode 的心跳逻辑目前比较简单，每次都新建连接发送 (短连接)
+        // 或者维护一个 Map<Address, Channel> 实现长连接。这里为了简化修改，使用短连接广播。
+        
+        EventLoopGroup group = new NioEventLoopGroup();
+        try {
+            Bootstrap b = new Bootstrap();
+            b.group(group)
+             .channel(NioSocketChannel.class)
+             .option(ChannelOption.SO_KEEPALIVE, true)
+             .handler(new ChannelInitializer<SocketChannel>() {
+                 @Override
+                 protected void initChannel(SocketChannel ch) {
+                     ch.pipeline().addLast(new PacketEncoder());
+                     // 忽略响应
+                     ch.pipeline().addLast(new SimpleChannelInboundHandler<Packet>() {
+                        @Override
+                        protected void channelRead0(ChannelHandlerContext ctx, Packet msg) {}
+                     });
+                 }
+             });
+    
+            // 快速超时
+            b.connect(registryAddr).addListener((ChannelFuture future) -> {
+                if (future.isSuccess()) {
+                    Channel ch = future.channel();
+                    doSendHeartbeat(ch);
+                    ch.close();
+                } else {
+                    // System.err.println("连接注册中心失败 (" + registryAddr + "): " + future.cause().getMessage());
+                }
+                group.shutdownGracefully();
+            });
+            
+        } catch (Exception e) {
+            group.shutdownGracefully();
         }
-
-        isConnecting.set(true);
-        Bootstrap b = new Bootstrap();
-        b.group(heartbeatGroup)
-         .channel(NioSocketChannel.class)
-         .option(ChannelOption.SO_KEEPALIVE, true)
-         .handler(new ChannelInitializer<SocketChannel>() {
-             @Override
-             protected void initChannel(SocketChannel ch) {
-                 ch.pipeline().addLast(new PacketEncoder());
-                 // 简单的 Handler 处理断开重连或响应
-                 ch.pipeline().addLast(new SimpleChannelInboundHandler<Packet>() {
-                    @Override
-                    protected void channelRead0(ChannelHandlerContext ctx, Packet msg) {
-                        // 忽略响应
-                    }
-                 });
-             }
-         });
-
-        b.connect(registryHost, registryPort).addListener((ChannelFuture future) -> {
-            isConnecting.set(false);
-            if (future.isSuccess()) {
-                System.out.println("注册中心连接建立成功");
-                heartbeatChannel = future.channel();
-                doSendHeartbeat(heartbeatChannel);
-            } else {
-                System.err.println("连接注册中心失败: " + future.cause().getMessage());
-            }
-        });
     }
 
     private void doSendHeartbeat(Channel channel) {
@@ -238,15 +243,46 @@ public class DataNodeServer {
 
         String regHost = "localhost";
         int regPort = 5367;
+        List<InetSocketAddress> registryAddresses = new ArrayList<>();
+        
         if (config.containsKey("registry")) {
             Map<String, Object> regConfig = (Map<String, Object>) config.get("registry");
-            regHost = (String) regConfig.getOrDefault("host", "localhost");
-            regPort = (int) regConfig.getOrDefault("port", 5367);
+            // 优先检查 'addresses' 或 'address'
+            Object addressesObj = regConfig.get("addresses");
+            if (addressesObj instanceof List) {
+                List<String> addrList = (List<String>) addressesObj;
+                for (String addr : addrList) {
+                    parseAndAddAddress(addr, registryAddresses);
+                }
+            } else if (addressesObj instanceof String) {
+                String[] addrs = ((String) addressesObj).split(",");
+                for (String addr : addrs) {
+                    parseAndAddAddress(addr, registryAddresses);
+                }
+            } else {
+                // 兼容旧配置
+                regHost = (String) regConfig.getOrDefault("host", "localhost");
+                regPort = (int) regConfig.getOrDefault("port", 5367);
+                registryAddresses.add(new InetSocketAddress(regHost, regPort));
+            }
+        } else {
+            registryAddresses.add(new InetSocketAddress(regHost, regPort));
         }
 
-        System.out.println("使用注册中心: " + regHost + ":" + regPort);
+        System.out.println("使用注册中心集群: " + registryAddresses);
         System.out.println("对外广播地址: " + advertisedHost);
 
-        new DataNodeServer(port, advertisedHost, storagePaths, regHost, regPort).run();
+        new DataNodeServer(port, advertisedHost, storagePaths, registryAddresses).run();
+    }
+    
+    private static void parseAndAddAddress(String addr, List<InetSocketAddress> list) {
+        try {
+            String[] parts = addr.trim().split(":");
+            if (parts.length == 2) {
+                list.add(new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
+            }
+        } catch (Exception e) {
+            System.err.println("解析注册中心地址失败: " + addr);
+        }
     }
 }

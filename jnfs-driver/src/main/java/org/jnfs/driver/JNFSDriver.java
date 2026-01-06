@@ -41,8 +41,8 @@ public class JNFSDriver {
 
     private static final String CLIENT_TOKEN = "jnfs-secure-token-2025";
 
-    private final String registryHost;
-    private final int registryPort;
+    // Registry 地址列表 (用于集群/高可用)
+    private final List<InetSocketAddress> registryAddresses = new CopyOnWriteArrayList<>();
     private final boolean useRegistry;
     
     private final EventLoopGroup group;
@@ -58,20 +58,39 @@ public class JNFSDriver {
      * 直连模式构造函数
      */
     public JNFSDriver(String nameNodeHost, int nameNodePort) {
-        this(nameNodeHost, nameNodePort, null, 0);
+        this(nameNodeHost, nameNodePort, null);
     }
 
     /**
      * 注册中心模式 (静态工厂方法)
+     * 支持传入多个注册中心地址，用逗号分隔，例如 "192.168.1.10:8000,192.168.1.11:8000"
+     */
+    public static JNFSDriver useRegistry(String registryAddresses) {
+        return new JNFSDriver(null, 0, registryAddresses);
+    }
+    
+    /**
+     * 兼容旧版 API：单点注册中心
      */
     public static JNFSDriver useRegistry(String registryHost, int registryPort) {
-        return new JNFSDriver(null, 0, registryHost, registryPort);
+        return useRegistry(registryHost + ":" + registryPort);
     }
 
-    private JNFSDriver(String nameNodeHost, int nameNodePort, String registryHost, int registryPort) {
-        this.registryHost = registryHost;
-        this.registryPort = registryPort;
-        this.useRegistry = (registryHost != null);
+    private JNFSDriver(String nameNodeHost, int nameNodePort, String registryAddrStr) {
+        this.useRegistry = (registryAddrStr != null);
+        
+        if (useRegistry) {
+            String[] addrs = registryAddrStr.split(",");
+            for (String addr : addrs) {
+                String[] parts = addr.trim().split(":");
+                if (parts.length == 2) {
+                    registryAddresses.add(new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
+                }
+            }
+            if (registryAddresses.isEmpty()) {
+                throw new IllegalArgumentException("无效的注册中心地址: " + registryAddrStr);
+            }
+        }
         
         this.group = new NioEventLoopGroup();
 
@@ -109,48 +128,55 @@ public class JNFSDriver {
     }
 
     private void refreshNameNodes() {
-        Bootstrap b = new Bootstrap();
-        RegistryDiscoveryHandler handler = new RegistryDiscoveryHandler();
-        
-        // 使用临时的 EventLoopGroup 避免阻塞主 group，或者直接复用 group
-        // 这里为了简单复用 group，注意不要阻塞
-        b.group(group)
-         .channel(NioSocketChannel.class)
-         .handler(new ChannelInitializer<SocketChannel>() {
-             @Override
-             protected void initChannel(SocketChannel ch) {
-                 ch.pipeline().addLast(new PacketDecoder());
-                 ch.pipeline().addLast(new PacketEncoder());
-                 ch.pipeline().addLast(handler);
-             }
-         });
-
-        try {
-            ChannelFuture f = b.connect(registryHost, registryPort).sync();
-            Channel channel = f.channel();
-
-            Packet request = new Packet();
-            request.setCommandType(CommandType.REGISTRY_GET_NAMENODES);
-            request.setToken(CLIENT_TOKEN);
-            channel.writeAndFlush(request);
-
-            f.channel().closeFuture().sync();
+        // 遍历所有注册中心地址，直到成功获取列表 (Failover)
+        for (InetSocketAddress registryAddr : registryAddresses) {
+            Bootstrap b = new Bootstrap();
+            RegistryDiscoveryHandler handler = new RegistryDiscoveryHandler();
             
-            List<String> nodes = handler.getNodes();
-            if (nodes != null && !nodes.isEmpty()) {
-                nameNodes.clear();
-                for (String node : nodes) {
-                    // node format: host:port
-                    String[] parts = node.split(":");
-                    if (parts.length == 2) {
-                        nameNodes.add(new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
+            b.group(group)
+             .channel(NioSocketChannel.class)
+             .handler(new ChannelInitializer<SocketChannel>() {
+                 @Override
+                 protected void initChannel(SocketChannel ch) {
+                     ch.pipeline().addLast(new PacketDecoder());
+                     ch.pipeline().addLast(new PacketEncoder());
+                     ch.pipeline().addLast(handler);
+                 }
+             });
+    
+            try {
+                // 连接当前 Registry
+                ChannelFuture f = b.connect(registryAddr).sync();
+                Channel channel = f.channel();
+    
+                Packet request = new Packet();
+                request.setCommandType(CommandType.REGISTRY_GET_NAMENODES);
+                request.setToken(CLIENT_TOKEN);
+                channel.writeAndFlush(request);
+    
+                f.channel().closeFuture().sync();
+                
+                List<String> nodes = handler.getNodes();
+                if (nodes != null) {
+                    // 即使列表为空也可能是正常的(刚启动)，但只要通信成功就算成功
+                    if (!nodes.isEmpty()) {
+                        nameNodes.clear();
+                        for (String node : nodes) {
+                            String[] parts = node.split(":");
+                            if (parts.length == 2) {
+                                nameNodes.add(new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
+                            }
+                        }
                     }
+                    System.out.println("[Driver] 从 Registry (" + registryAddr + ") 刷新 NameNode 列表: " + nameNodes);
+                    // 成功后跳出循环，不再尝试其他 Registry
+                    return;
                 }
-                System.out.println("[Driver] 刷新 NameNode 列表: " + nameNodes);
+            } catch (Exception e) {
+                System.err.println("[Driver] 连接 Registry (" + registryAddr + ") 失败，尝试下一个...");
             }
-        } catch (Exception e) {
-            System.err.println("[Driver] 刷新 NameNode 列表失败: " + e.getMessage());
         }
+        System.err.println("[Driver] 无法连接任何 Registry，刷新 NameNode 失败");
     }
 
     public void close() {
