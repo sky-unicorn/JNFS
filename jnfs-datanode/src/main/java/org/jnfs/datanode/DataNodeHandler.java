@@ -314,17 +314,20 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         closeCurrentFile();
+        // 只有在上传未完成时才删除临时文件
+        // 区分：如果是下载连接断开，currentTmpFile 为空，不会误删
+        // 如果是上传完成但还没来得及清理状态(理论上finishUpload已清理)，这里也是安全的
         if (currentTmpFile != null && currentTmpFile.exists()) {
             try {
-                currentTmpFile.delete();
-                System.out.println("连接断开，清理未完成临时文件: " + currentTmpFile.getAbsolutePath());
+                // 判断是否已经接收完毕
+                if (receivedBytes < currentFileSize) {
+                    currentTmpFile.delete();
+                    System.out.println("连接异常断开，清理未完成临时文件: " + currentTmpFile.getAbsolutePath());
+                }
             } catch (Exception ignore) {
             }
         }
-        currentFileName = null;
-        currentTmpFile = null;
-        currentFileSize = 0;
-        receivedBytes = 0;
+        resetState();
         super.channelInactive(ctx);
     }
 
