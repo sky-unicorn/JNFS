@@ -43,10 +43,13 @@ public class NameNodeServer {
         // 启动注册与心跳线程
         startRegistrationHeartbeatThread();
 
+        // 共享的 Handler 实例
+        NameNodeHandler sharedHandler = new NameNodeHandler();
+        
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(16);
-
-        // 使用 NettyServerUtils 启动服务
-        NettyServerUtils.start("NameNode", port, new NameNodeHandler(), businessGroup);
+        
+        // 使用 NettyServerUtils 启动服务，传入共享 Handler
+        NettyServerUtils.start("NameNode", port, sharedHandler, businessGroup);
     }
 
     private void startRegistrationHeartbeatThread() {

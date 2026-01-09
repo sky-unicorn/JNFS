@@ -11,6 +11,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+import io.netty.channel.ChannelHandler;
+
 /**
  * NameNode 业务处理器
  * 处理客户端的元数据请求
@@ -18,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 升级：支持动态初始化 MetadataManager
  * 修复：引入 TimedCache 解决 pendingUploads 死锁问题
  */
+@ChannelHandler.Sharable
 public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     private static final String VALID_TOKEN = "jnfs-secure-token-2025";

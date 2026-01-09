@@ -19,7 +19,6 @@ import java.util.UUID;
  * DataNode 业务处理器
  * 处理文件上传和下载的数据流
  *
- * 升级：支持断点续传/垃圾回收，上传时先写 .tmp 文件
  */
 public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
