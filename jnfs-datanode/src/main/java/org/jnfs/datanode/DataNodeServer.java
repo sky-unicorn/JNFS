@@ -59,7 +59,11 @@ public class DataNodeServer {
 
         try {
             // 使用 NettyServerUtils 启动服务
-            NettyServerUtils.start("DataNode", port, new DataNodeHandler(storagePaths), businessGroup);
+            // 关键修复: 传入 Supplier 以便为每个连接创建新的 DataNodeHandler 实例
+            // DataNodeHandler 是有状态的 (包含文件流)，绝对不能共享！
+            NettyServerUtils.start("DataNode", port, 
+                () -> new DataNodeHandler(storagePaths), 
+                businessGroup);
         } finally {
             businessGroup.shutdownGracefully();
             heartbeatGroup.shutdownGracefully();
