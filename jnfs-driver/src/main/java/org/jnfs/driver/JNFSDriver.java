@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import java.io.InputStream;
+
 /**
  * JNFS Driver (SDK)
  * 提供给客户端应用使用的核心 API
@@ -178,7 +180,57 @@ public class JNFSDriver {
     }
 
     /**
-     * 上传文件
+     * 上传文件 (byte[] 模式)
+     * 适用于小文件或已读取到内存的数据
+     * @param data 文件内容
+     * @param filename 文件名 (用于元数据记录)
+     * @return storageId
+     */
+    public String uploadFile(byte[] data, String filename) throws Exception {
+        if (data == null || data.length == 0) {
+            throw new IllegalArgumentException("文件内容不能为空");
+        }
+
+        // 创建临时文件
+        File tmpFile = File.createTempFile("jnfs_upload_", "_" + filename);
+        try {
+            FileUtil.writeBytes(data, tmpFile);
+            return uploadFile(tmpFile);
+        } finally {
+            if (tmpFile.exists()) {
+                tmpFile.delete();
+            }
+        }
+    }
+
+    /**
+     * 上传文件 (InputStream 模式)
+     * 适用于 Web 上传 (MultipartFile.getInputStream) 或其他流式输入
+     * 注意：此方法会先将流写入临时文件以计算 Hash 和支持零拷贝上传
+     * 
+     * @param in 输入流
+     * @param filename 文件名
+     * @return storageId
+     */
+    public String uploadFile(InputStream in, String filename) throws Exception {
+        if (in == null) {
+            throw new IllegalArgumentException("输入流不能为空");
+        }
+
+        // 创建临时文件
+        File tmpFile = File.createTempFile("jnfs_upload_stream_", "_" + filename);
+        try {
+            FileUtil.writeFromStream(in, tmpFile);
+            return uploadFile(tmpFile);
+        } finally {
+            if (tmpFile.exists()) {
+                tmpFile.delete();
+            }
+        }
+    }
+
+    /**
+     * 上传文件 (File 模式)
      * 1. 客户端本地加密
      * 2. 上传密文到 DataNode
      */
