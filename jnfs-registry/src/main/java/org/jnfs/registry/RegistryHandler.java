@@ -15,12 +15,15 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import io.netty.channel.ChannelHandler;
+
 /**
  * 注册中心业务处理器
  * 维护服务列表和心跳
  * 
  * 修复：增加主动清理过期节点的定时任务，防止被动过期导致的内存泄漏
  */
+@ChannelHandler.Sharable
 public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
     private static final String VALID_TOKEN = "jnfs-secure-token-2025";
