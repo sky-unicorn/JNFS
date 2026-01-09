@@ -4,7 +4,7 @@ server:
   port: 5369
   # 对外广播的 IP 地址 (默认: 自动获取本机局域网 IP)
   # 在多网卡环境或云服务器上，建议手动指定公网/内网 IP
-  # advertised_host: 192.168.1.100
+  advertised_host: 100.10.10.241
 
 # --- 存储路径配置 ---
 storage:
@@ -19,6 +19,6 @@ registry:
   # 方式 1: 单点配置 (兼容旧版)
   # host: localhost
   # port: 5367
-  
+
   # 方式 2: 集群配置 (推荐)
   addresses: localhost:5367
