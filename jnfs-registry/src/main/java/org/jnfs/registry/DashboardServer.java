@@ -1,9 +1,10 @@
 package org.jnfs.registry;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 /**
  * 仪表盘服务 (HTTP Server)
@@ -22,9 +23,9 @@ public class DashboardServer {
     public void start() {
         try {
             com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress(port), 0);
-            
+
             server.createContext("/", new DashboardHttpHandler());
-            
+
             server.createContext("/api/nodes", exchange -> {
                 String json = getNodesJson();
                 byte[] response = json.getBytes(StandardCharsets.UTF_8);

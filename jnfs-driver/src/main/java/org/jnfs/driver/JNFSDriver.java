@@ -16,6 +16,7 @@ import io.netty.util.concurrent.Future;
 import org.jnfs.common.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.helpers.NOPLogger;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -32,7 +33,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class JNFSDriver {
 
-    private static final Logger LOG = LoggerFactory.getLogger(JNFSDriver.class);
+    // 改为实例变量，以便根据配置决定是否输出日志
+    private final Logger LOG;
 
     private static final String CLIENT_TOKEN = "jnfs-secure-token-2025";
 
@@ -50,28 +52,56 @@ public class JNFSDriver {
     private final ChannelPoolMap<InetSocketAddress, SimpleChannelPool> poolMap;
 
     /**
-     * 直连模式构造函数
+     * 直连模式构造函数 (默认开启日志)
      */
     public JNFSDriver(String nameNodeHost, int nameNodePort) {
-        this(nameNodeHost, nameNodePort, null);
+        this(nameNodeHost, nameNodePort, null, true);
     }
 
     /**
-     * 注册中心模式 (静态工厂方法)
+     * 直连模式构造函数 (可控制日志)
+     */
+    public JNFSDriver(String nameNodeHost, int nameNodePort, boolean enableLog) {
+        this(nameNodeHost, nameNodePort, null, enableLog);
+    }
+
+    /**
+     * 注册中心模式 (静态工厂方法 - 默认开启日志)
      * 支持传入多个注册中心地址，用逗号分隔，例如 "192.168.1.10:8000,192.168.1.11:8000"
      */
     public static JNFSDriver useRegistry(String registryAddresses) {
-        return new JNFSDriver(null, 0, registryAddresses);
+        return new JNFSDriver(null, 0, registryAddresses, true);
     }
 
     /**
-     * 兼容旧版 API：单点注册中心
+     * 注册中心模式 (静态工厂方法 - 可控制日志)
      */
-    public static JNFSDriver useRegistry(String registryHost, int registryPort) {
-        return useRegistry(registryHost + ":" + registryPort);
+    public static JNFSDriver useRegistry(String registryAddresses, boolean enableLog) {
+        return new JNFSDriver(null, 0, registryAddresses, enableLog);
     }
 
-    private JNFSDriver(String nameNodeHost, int nameNodePort, String registryAddrStr) {
+    /**
+     * 兼容旧版 API：单点注册中心 (默认开启日志)
+     */
+    public static JNFSDriver useRegistry(String registryHost, int registryPort) {
+        return useRegistry(registryHost + ":" + registryPort, true);
+    }
+
+    /**
+     * 兼容旧版 API：单点注册中心 (可控制日志)
+     */
+    public static JNFSDriver useRegistry(String registryHost, int registryPort, boolean enableLog) {
+        return useRegistry(registryHost + ":" + registryPort, enableLog);
+    }
+
+    private JNFSDriver(String nameNodeHost, int nameNodePort, String registryAddrStr, boolean enableLog) {
+        // 初始化 Logger：如果启用日志则使用标准 LoggerFactory，否则使用 NOPLogger (不输出任何日志)
+        if (enableLog) {
+            this.LOG = LoggerFactory.getLogger(JNFSDriver.class);
+        } else {
+            this.LOG = NOPLogger.NOP_LOGGER;
+        }
+
         this.useRegistry = (registryAddrStr != null);
 
         if (useRegistry) {
@@ -404,7 +434,7 @@ public class JNFSDriver {
 
     private void uploadToDataNode(String host, int port, File file, String hash) throws Exception {
         Bootstrap b = new Bootstrap();
-        SyncHandler handler = new SyncHandler();
+        SyncHandler handler = new SyncHandler(LOG);
         b.group(group)
          .channel(NioSocketChannel.class)
          .handler(new ChannelInitializer<SocketChannel>() {
@@ -444,7 +474,7 @@ public class JNFSDriver {
     private void downloadFromDataNode(String host, int port, String hash, File targetFile) throws Exception {
         Bootstrap b = new Bootstrap();
         // 使用 PacketDecoder 复用协议解析逻辑
-        DownloadHandler handler = new DownloadHandler(targetFile);
+        DownloadHandler handler = new DownloadHandler(targetFile, LOG);
         b.group(group)
          .channel(NioSocketChannel.class)
          .handler(new ChannelInitializer<SocketChannel>() {
@@ -510,7 +540,7 @@ public class JNFSDriver {
 
         Channel channel = future.getNow();
 
-        SyncHandler handler = new SyncHandler();
+        SyncHandler handler = new SyncHandler(LOG);
         try {
             if (channel.pipeline().get("syncHandler") != null) {
                 channel.pipeline().remove("syncHandler");
@@ -542,6 +572,11 @@ public class JNFSDriver {
 
     private static class SyncHandler extends SimpleChannelInboundHandler<Packet> {
         private final BlockingQueue<Packet> queue = new LinkedBlockingQueue<>();
+        private final Logger logger;
+
+        public SyncHandler(Logger logger) {
+            this.logger = logger;
+        }
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, Packet msg) {
@@ -558,7 +593,7 @@ public class JNFSDriver {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            LOG.error("ConnectionHandler异常", cause);
+            logger.error("ConnectionHandler异常", cause);
             ctx.close();
         }
     }
@@ -596,9 +631,11 @@ public class JNFSDriver {
         private long fileSize = -1;
         private long receivedBytes = 0;
         private final BlockingQueue<Boolean> completionSignal = new LinkedBlockingQueue<>();
+        private final Logger logger;
 
-        public DownloadHandler(File targetFile) {
+        public DownloadHandler(File targetFile, Logger logger) {
             this.targetFile = targetFile;
+            this.logger = logger;
         }
 
         @Override
@@ -629,7 +666,7 @@ public class JNFSDriver {
                 }
                 // 使用 SecurityUtil 创建流式解密输出流
                 this.out = SecurityUtil.createDecryptOutputStream(new FileOutputStream(targetFile));
-                LOG.info("[Driver] 开始接收文件流，大小: {}", fileSize);
+                logger.info("[Driver] 开始接收文件流，大小: {}", fileSize);
 
             } else if (msg instanceof ByteBuf) {
                 // 处理文件流数据
@@ -641,7 +678,7 @@ public class JNFSDriver {
                     receivedBytes += bytes.length;
 
                     if (receivedBytes >= fileSize) {
-                        LOG.info("[Driver] 下载完成");
+                        logger.info("[Driver] 下载完成");
                         closeFile();
                         completionSignal.offer(true);
                     }
@@ -655,7 +692,7 @@ public class JNFSDriver {
                      out.close();
                  }
              } catch (IOException e) {
-                 LOG.error("关闭文件输出流失败", e);
+                 logger.error("关闭文件输出流失败", e);
              } finally {
                  out = null;
              }
@@ -670,7 +707,7 @@ public class JNFSDriver {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            LOG.error("DownloadHandler异常", cause);
+            logger.error("DownloadHandler异常", cause);
             closeFile();
             ctx.close();
             completionSignal.offer(false);

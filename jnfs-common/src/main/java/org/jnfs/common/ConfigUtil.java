@@ -1,8 +1,8 @@
 package org.jnfs.common;
 
-import org.yaml.snakeyaml.Yaml;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.yaml.snakeyaml.Yaml;
 
 import java.io.InputStream;
 import java.net.InetSocketAddress;
@@ -25,7 +25,7 @@ public class ConfigUtil {
      */
     public static Map<String, Object> loadConfig(String fileName) {
         Yaml yaml = new Yaml();
-        
+
         // 1. 尝试从外部运行目录加载 (便于生产环境修改配置)
         try {
             if (Files.exists(Paths.get(fileName))) {
@@ -67,7 +67,7 @@ public class ConfigUtil {
             if (addressesObj == null) {
                  addressesObj = regConfig.get("address");
             }
-            
+
             if (addressesObj instanceof List) {
                 List<String> addrList = (List<String>) addressesObj;
                 for (String addr : addrList) {
@@ -87,7 +87,7 @@ public class ConfigUtil {
         } else {
             registryAddresses.add(new InetSocketAddress(defaultHost, defaultPort));
         }
-        
+
         return registryAddresses;
     }
 
