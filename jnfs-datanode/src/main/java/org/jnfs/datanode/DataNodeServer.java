@@ -10,6 +10,8 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
 import org.jnfs.common.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -23,7 +25,6 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * DataNode 服务启动类
@@ -32,6 +33,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 升级：添加后台垃圾回收线程 (GC)
  */
 public class DataNodeServer {
+
+    private static final Logger LOG = LoggerFactory.getLogger(DataNodeServer.class);
 
     private final int port;
     private final String advertisedHost;
@@ -61,8 +64,8 @@ public class DataNodeServer {
             // 使用 NettyServerUtils 启动服务
             // 关键修复: 传入 Supplier 以便为每个连接创建新的 DataNodeHandler 实例
             // DataNodeHandler 是有状态的 (包含文件流)，绝对不能共享！
-            NettyServerUtils.start("DataNode", port, 
-                () -> new DataNodeHandler(storagePaths), 
+            NettyServerUtils.start("DataNode", port,
+                () -> new DataNodeHandler(storagePaths),
                 businessGroup);
         } finally {
             businessGroup.shutdownGracefully();
@@ -76,7 +79,7 @@ public class DataNodeServer {
             try {
                 sendHeartbeatToRegistry();
             } catch (Exception e) {
-                System.err.println("发送心跳失败: " + e.getMessage());
+                LOG.error("发送心跳失败: {}", e.getMessage(), e);
             }
         }, 2, 5, TimeUnit.SECONDS);
     }
@@ -88,11 +91,11 @@ public class DataNodeServer {
         ScheduledExecutorService gcScheduler = Executors.newSingleThreadScheduledExecutor();
         // 每 1 小时执行一次 GC (测试时可缩短)
         gcScheduler.scheduleAtFixedRate(() -> {
-            System.out.println("[GC] 开始执行垃圾回收...");
+            LOG.info("[GC] 开始执行垃圾回收...");
             try {
                 cleanupTmpFiles();
             } catch (Exception e) {
-                System.err.println("[GC] 执行失败: " + e.getMessage());
+                LOG.error("[GC] 执行失败: {}", e.getMessage(), e);
             }
         }, 1, 60, TimeUnit.MINUTES);
     }
@@ -114,7 +117,7 @@ public class DataNodeServer {
                     if (file.toString().endsWith(DataNodeHandler.TMP_SUFFIX)) {
                         long lastModified = attrs.lastModifiedTime().toMillis();
                         if (now - lastModified > expirationTime) {
-                            System.out.println("[GC] 删除过期临时文件: " + file);
+                            LOG.info("[GC] 删除过期临时文件: {}", file);
                             Files.delete(file);
                         }
                     }
@@ -215,8 +218,8 @@ public class DataNodeServer {
 
         List<InetSocketAddress> registryAddresses = ConfigUtil.parseRegistryAddresses(config);
 
-        System.out.println("使用注册中心集群: " + registryAddresses);
-        System.out.println("对外广播地址: " + advertisedHost);
+        LOG.info("使用注册中心集群: {}", registryAddresses);
+        LOG.info("对外广播地址: {}", advertisedHost);
 
         new DataNodeServer(port, advertisedHost, storagePaths, registryAddresses).run();
     }

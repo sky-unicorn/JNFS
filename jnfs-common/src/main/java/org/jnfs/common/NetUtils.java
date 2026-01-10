@@ -1,6 +1,8 @@
 package org.jnfs.common;
 
 import cn.hutool.core.net.NetUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashSet;
 
@@ -8,6 +10,8 @@ import java.util.LinkedHashSet;
  * 网络工具类
  */
 public class NetUtils {
+
+    private static final Logger LOG = LoggerFactory.getLogger(NetUtils.class);
 
     /**
      * 获取本机 IP 地址
@@ -28,7 +32,7 @@ public class NetUtils {
             // 兜底方案
             return NetUtil.getLocalhostStr();
         } catch (Exception e) {
-            e.printStackTrace();
+            LOG.error("获取本机IP失败", e);
             return "localhost";
         }
     }

@@ -1,9 +1,12 @@
 package org.jnfs.registry;
 
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.Packet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -15,16 +18,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-import io.netty.channel.ChannelHandler;
-
 /**
  * 注册中心业务处理器
  * 维护服务列表和心跳
- * 
+ *
  * 修复：增加主动清理过期节点的定时任务，防止被动过期导致的内存泄漏
  */
 @ChannelHandler.Sharable
 public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(RegistryHandler.class);
 
     private static final String VALID_TOKEN = "jnfs-secure-token-2025";
 
@@ -43,7 +46,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     private static final Map<String, NodeInfo> dataNodes = new ConcurrentHashMap<>();
     // NameNode 列表: address -> NodeInfo
     private static final Map<String, NodeInfo> nameNodes = new ConcurrentHashMap<>();
-    
+
     // 心跳超时时间 (默认30秒)，可由 RegistryServer 启动时修改
     public static volatile long heartbeatTimeout = 30 * 1000;
 
@@ -59,22 +62,22 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         cleanerExecutor.scheduleAtFixedRate(() -> {
             try {
                 long now = System.currentTimeMillis();
-                
+
                 int dnInit = dataNodes.size();
                 dataNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > heartbeatTimeout);
                 int dnFinal = dataNodes.size();
                 if (dnInit != dnFinal) {
-                    System.out.println("[Registry-Cleaner] 清理了 " + (dnInit - dnFinal) + " 个过期 DataNode");
+                    LOG.info("[Registry-Cleaner] 清理了 {} 个过期 DataNode", dnInit - dnFinal);
                 }
-                
+
                 int nnInit = nameNodes.size();
                 nameNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > heartbeatTimeout);
                 int nnFinal = nameNodes.size();
                 if (nnInit != nnFinal) {
-                    System.out.println("[Registry-Cleaner] 清理了 " + (nnInit - nnFinal) + " 个过期 NameNode");
+                    LOG.info("[Registry-Cleaner] 清理了 {} 个过期 NameNode", nnInit - nnFinal);
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                LOG.error("Registry清理任务异常", e);
             }
         }, 10, 10, TimeUnit.SECONDS);
     }
@@ -85,7 +88,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     public static Map<String, NodeInfo> getDataNodes() {
         return Collections.unmodifiableMap(dataNodes);
     }
-    
+
     public static Map<String, NodeInfo> getNameNodes() {
         return Collections.unmodifiableMap(nameNodes);
     }
@@ -93,7 +96,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exception {
         if (!VALID_TOKEN.equals(packet.getToken())) {
-            System.out.println("Registry 安全拦截: 无效的 Token - " + ctx.channel().remoteAddress());
+            LOG.warn("Registry 安全拦截: 无效的 Token - {}", ctx.channel().remoteAddress());
             sendResponse(ctx, CommandType.ERROR, "Authentication Failed".getBytes(StandardCharsets.UTF_8));
             ctx.close();
             return;
@@ -124,7 +127,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         String payload = new String(packet.getData(), StandardCharsets.UTF_8);
         String address;
         long freeSpace = 0;
-        
+
         if (payload.contains("|")) {
             String[] parts = payload.split("\\|");
             address = parts[0];
@@ -136,22 +139,22 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         } else {
             address = payload;
         }
-        
+
         dataNodes.put(address, new NodeInfo(System.currentTimeMillis(), freeSpace));
-        
+
         if (packet.getCommandType() == CommandType.REGISTRY_REGISTER) {
-            System.out.println("DataNode 注册成功: " + address);
+            LOG.info("DataNode 注册成功: {}", address);
             sendResponse(ctx, CommandType.REGISTRY_RESPONSE_REGISTER, "OK".getBytes(StandardCharsets.UTF_8));
         }
     }
 
     private void handleRegisterOrHeartbeatNameNode(ChannelHandlerContext ctx, Packet packet) {
         String address = new String(packet.getData(), StandardCharsets.UTF_8);
-        
+
         nameNodes.put(address, new NodeInfo(System.currentTimeMillis(), 0));
-        
+
         if (packet.getCommandType() == CommandType.REGISTRY_REGISTER_NAMENODE) {
-            System.out.println("NameNode 注册成功: " + address);
+            LOG.info("NameNode 注册成功: {}", address);
             sendResponse(ctx, CommandType.REGISTRY_RESPONSE_REGISTER_NAMENODE, "OK".getBytes(StandardCharsets.UTF_8));
         }
     }
@@ -159,13 +162,13 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     private void handleGetDataNodes(ChannelHandlerContext ctx) {
         long now = System.currentTimeMillis();
         List<String> activeNodes = new ArrayList<>();
-        
+
         dataNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > heartbeatTimeout);
-        
+
         for (Map.Entry<String, NodeInfo> entry : dataNodes.entrySet()) {
             activeNodes.add(entry.getKey() + "|" + entry.getValue().freeSpace);
         }
-        
+
         String response = String.join(",", activeNodes);
         sendResponse(ctx, CommandType.REGISTRY_RESPONSE_DATANODES, response.getBytes(StandardCharsets.UTF_8));
     }
@@ -173,13 +176,13 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     private void handleGetNameNodes(ChannelHandlerContext ctx) {
         long now = System.currentTimeMillis();
         List<String> activeNodes = new ArrayList<>();
-        
+
         nameNodes.entrySet().removeIf(entry -> (now - entry.getValue().lastHeartbeatTime) > heartbeatTimeout);
-        
+
         for (String address : nameNodes.keySet()) {
             activeNodes.add(address);
         }
-        
+
         String response = String.join(",", activeNodes);
         sendResponse(ctx, CommandType.REGISTRY_RESPONSE_NAMENODES, response.getBytes(StandardCharsets.UTF_8));
     }
@@ -193,7 +196,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        cause.printStackTrace();
+        LOG.error("RegistryHandler异常", cause);
         ctx.close();
     }
 }

@@ -2,12 +2,16 @@ package org.jnfs.registry;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 仪表盘服务 (HTTP Server)
  * 提供系统状态的 Web 界面和 JSON API
  */
 public class DashboardServer {
+
+    private static final Logger LOG = LoggerFactory.getLogger(DashboardServer.class);
 
     private final int port;
 
@@ -33,9 +37,9 @@ public class DashboardServer {
 
             server.setExecutor(null);
             server.start();
-            System.out.println("JNFS Dashboard 启动成功，访问地址: http://localhost:" + port);
+            LOG.info("JNFS Dashboard 启动成功，访问地址: http://localhost:{}", port);
         } catch (Exception e) {
-            e.printStackTrace();
+            LOG.error("Dashboard启动失败", e);
         }
     }
 

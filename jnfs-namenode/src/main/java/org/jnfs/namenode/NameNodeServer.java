@@ -8,6 +8,8 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
 import org.jnfs.common.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -25,6 +27,8 @@ import java.util.concurrent.TimeUnit;
  * 升级：集成注册中心发现机制，并根据配置初始化元数据管理器
  */
 public class NameNodeServer {
+
+    private static final Logger LOG = LoggerFactory.getLogger(NameNodeServer.class);
 
     private final int port;
     private final String advertisedHost;
@@ -58,7 +62,7 @@ public class NameNodeServer {
             try {
                 sendHeartbeatToRegistry();
             } catch (Exception e) {
-                System.err.println("发送心跳失败: " + e.getMessage());
+                LOG.error("发送心跳失败: {}", e.getMessage(), e);
             }
         }, 0, 10, TimeUnit.SECONDS);
     }
@@ -105,7 +109,7 @@ public class NameNodeServer {
             try {
                 fetchDataNodesFromRegistry();
             } catch (Exception e) {
-                System.err.println("从注册中心获取节点失败: " + e.getMessage());
+                LOG.error("从注册中心获取节点失败: {}", e.getMessage(), e);
             }
         }, 0, 10, TimeUnit.SECONDS); // 每10秒刷新一次
     }
@@ -160,8 +164,8 @@ public class NameNodeServer {
         // 读取注册中心配置 (支持逗号分隔的多个地址)
         List<InetSocketAddress> registryAddresses = ConfigUtil.parseRegistryAddresses(config);
 
-        System.out.println("使用注册中心集群: " + registryAddresses);
-        System.out.println("对外广播地址: " + advertisedHost);
+        LOG.info("使用注册中心集群: {}", registryAddresses);
+        LOG.info("对外广播地址: {}", advertisedHost);
 
         // --- 初始化 MetadataManager ---
         MetadataManager metadataManager = null;
@@ -170,7 +174,7 @@ public class NameNodeServer {
             String mode = (String) metaConfig.getOrDefault("mode", "file");
 
             if ("mysql".equalsIgnoreCase(mode)) {
-                System.out.println("使用 MySQL 元数据存储");
+                LOG.info("使用 MySQL 元数据存储");
                 Map<String, Object> mysqlConfig = (Map<String, Object>) metaConfig.get("mysql");
                 String dbHost = (String) mysqlConfig.getOrDefault("host", "localhost");
                 int dbPort = (int) mysqlConfig.getOrDefault("port", 3306);
@@ -180,11 +184,11 @@ public class NameNodeServer {
 
                 metadataManager = new MySQLMetadataManager(dbHost, dbPort, dbName, user, password);
             } else {
-                System.out.println("使用本地文件元数据存储");
+                LOG.info("使用本地文件元数据存储");
                 metadataManager = new MetadataManager();
             }
         } else {
-            System.out.println("默认使用本地文件元数据存储");
+            LOG.info("默认使用本地文件元数据存储");
             metadataManager = new MetadataManager();
         }
 
@@ -202,10 +206,10 @@ public class NameNodeServer {
                 String nodesStr = new String(packet.getData(), StandardCharsets.UTF_8);
                 if (!nodesStr.isEmpty()) {
                     String[] nodes = nodesStr.split(",");
-                    System.out.println("更新 DataNode 列表: " + Arrays.toString(nodes));
+                    LOG.info("更新 DataNode 列表: {}", Arrays.toString(nodes));
                     NameNodeHandler.initDataNodes(Arrays.asList(nodes));
                 } else {
-                    System.out.println("当前无活跃 DataNode");
+                    LOG.info("当前无活跃 DataNode");
                     NameNodeHandler.initDataNodes(null);
                 }
             }

@@ -2,6 +2,8 @@ package org.jnfs.registry;
 
 import org.jnfs.common.ConfigUtil;
 import org.jnfs.common.NettyServerUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 
@@ -12,6 +14,8 @@ import java.util.Map;
  * 升级：集成 Dashboard HTTP 服务
  */
 public class RegistryServer {
+
+    private static final Logger LOG = LoggerFactory.getLogger(RegistryServer.class);
 
     private final int port;
     private final int dashboardPort;
@@ -49,7 +53,7 @@ public class RegistryServer {
         // 更新 Handler 中的超时设置
         RegistryHandler.heartbeatTimeout = heartbeatTimeout;
 
-        System.out.println("启动注册中心 -> RPC Port: " + port + ", Dashboard Port: " + dashboardPort + ", Heartbeat Timeout: " + heartbeatTimeout + "ms");
+        LOG.info("启动注册中心 -> RPC Port: {}, Dashboard Port: {}, Heartbeat Timeout: {}ms", port, dashboardPort, heartbeatTimeout);
         
         new RegistryServer(port, dashboardPort).run();
     }

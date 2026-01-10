@@ -6,6 +6,8 @@ import io.netty.channel.DefaultFileRegion;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.Packet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -21,6 +23,8 @@ import java.util.UUID;
  *
  */
 public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(DataNodeHandler.class);
 
     // 预设的安全令牌 (与 NameNode 保持一致)
     private static final String VALID_TOKEN = "jnfs-secure-token-2025";
@@ -58,7 +62,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     private void handlePacket(ChannelHandlerContext ctx, Packet packet) {
         // 验证 Token (仅针对控制指令)
         if (!VALID_TOKEN.equals(packet.getToken())) {
-            System.out.println("安全拦截: 无效的 Token");
+            LOG.warn("安全拦截: 无效的 Token");
             sendResponse(ctx, CommandType.ERROR, "Authentication Failed".getBytes(StandardCharsets.UTF_8));
             ctx.close();
             return;
@@ -82,7 +86,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
         String fileName = new String(data, StandardCharsets.UTF_8);
 
-        System.out.println("准备接收文件: " + fileName + ", 大小: " + fileSize + " 字节");
+        LOG.info("准备接收文件: {}, 大小: {} 字节", fileName, fileSize);
 
         try {
             if (currentFos != null) {
@@ -106,7 +110,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
                 finishUpload(ctx);
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            LOG.error("文件上传初始化失败", e);
             sendResponse(ctx, CommandType.ERROR, ("服务端错误: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
         }
     }
@@ -125,7 +129,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
                 finishUpload(ctx);
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            LOG.error("文件块写入失败", e);
             closeCurrentFile();
             sendResponse(ctx, CommandType.ERROR, ("写入错误: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
         }
@@ -142,7 +146,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         try {
             finalFile = getStorageFile(currentFileName);
         } catch (IOException e) {
-            e.printStackTrace();
+            LOG.error("获取存储文件路径失败", e);
             // 尝试手动删除失败的 tmp
             if (currentTmpFile != null) currentTmpFile.delete();
             sendResponse(ctx, CommandType.ERROR, ("文件存储失败(路径校验错误): " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
@@ -153,7 +157,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         synchronized (FILE_LOCK) {
             // 如果目标文件已存在，直接删除临时文件并返回成功 (视为幂等上传)
             if (finalFile.exists()) {
-                System.out.println("文件已存在，跳过重命名: " + currentFileName);
+                LOG.info("文件已存在，跳过重命名: {}", currentFileName);
                 currentTmpFile.delete();
                 sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功(秒传): " + currentFileName).getBytes(StandardCharsets.UTF_8));
                 // 重置状态
@@ -162,16 +166,16 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             }
 
             if (currentTmpFile.renameTo(finalFile)) {
-                System.out.println("文件存储完成: " + currentFileName);
+                LOG.info("文件存储完成: {}", currentFileName);
                 sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
             } else {
                 // 双重检查: 可能在重命名的一瞬间被其他线程抢先了 (虽然有 FILE_LOCK，但防御性编程)
                 if (finalFile.exists()) {
-                     System.out.println("重命名失败但文件已存在 (并发上传): " + currentFileName);
+                     LOG.info("重命名失败但文件已存在 (并发上传): {}", currentFileName);
                      currentTmpFile.delete();
                      sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
                 } else {
-                    System.err.println("重命名临时文件失败: " + currentTmpFile.getAbsolutePath());
+                    LOG.error("重命名临时文件失败: {}", currentTmpFile.getAbsolutePath());
                     // 尝试手动删除失败的 tmp
                     currentTmpFile.delete();
                     sendResponse(ctx, CommandType.ERROR, "文件存储失败(重命名错误)".getBytes(StandardCharsets.UTF_8));
@@ -206,7 +210,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             return;
         }
 
-        System.out.println("开始发送文件: " + filename);
+        LOG.info("开始发送文件: {}", filename);
 
         long fileLength = file.length();
         Packet response = new Packet();
@@ -298,7 +302,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
                 currentFos.close();
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            LOG.error("关闭文件流失败", e);
         }
         currentFileChannel = null;
         currentFos = null;
@@ -322,7 +326,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
                 // 判断是否已经接收完毕
                 if (receivedBytes < currentFileSize) {
                     currentTmpFile.delete();
-                    System.out.println("连接异常断开，清理未完成临时文件: " + currentTmpFile.getAbsolutePath());
+                    LOG.info("连接异常断开，清理未完成临时文件: {}", currentTmpFile.getAbsolutePath());
                 }
             } catch (Exception ignore) {
             }
@@ -333,7 +337,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        cause.printStackTrace();
+        LOG.error("DataNodeHandler异常", cause);
         closeCurrentFile();
         ctx.close();
     }

@@ -6,6 +6,8 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.EventExecutorGroup;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.function.Supplier;
 
@@ -14,6 +16,8 @@ import java.util.function.Supplier;
  * 用于消除重复的 ServerBootstrap 样板代码
  */
 public class NettyServerUtils {
+
+    private static final Logger LOG = LoggerFactory.getLogger(NettyServerUtils.class);
 
     /**
      * 启动一个标准的 JNFS Netty 服务 (单例 Handler 模式)
@@ -63,14 +67,14 @@ public class NettyServerUtils {
              .childOption(ChannelOption.SO_SNDBUF, 64 * 1024);
 
             ChannelFuture f = b.bind(port).sync();
-            System.out.println("JNFS " + name + " 启动成功，端口: " + port);
+            LOG.info("JNFS {} 启动成功，端口: {}", name, port);
 
             f.channel().closeFuture().sync();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            System.err.println(name + " 启动被中断");
+            LOG.warn("{} 启动被中断", name);
         } catch (Exception e) {
-            System.err.println(name + " 启动失败: " + e.getMessage());
+            LOG.error("{} 启动失败: {}", name, e.getMessage());
         } finally {
             workerGroup.shutdownGracefully();
             bossGroup.shutdownGracefully();

@@ -2,6 +2,8 @@ package org.jnfs.namenode;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -15,6 +17,8 @@ import java.util.Set;
  * 使用 JDBC 替换本地文件日志
  */
 public class MySQLMetadataManager extends MetadataManager {
+
+    private static final Logger LOG = LoggerFactory.getLogger(MySQLMetadataManager.class);
 
     private final HikariDataSource dataSource;
 
@@ -53,7 +57,7 @@ public class MySQLMetadataManager extends MetadataManager {
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
             );
         } catch (SQLException e) {
-            e.printStackTrace();
+            LOG.error("创建数据库表失败", e);
         }
     }
 
@@ -62,7 +66,7 @@ public class MySQLMetadataManager extends MetadataManager {
                         Map<String, String> hashToStorage,
                         Map<String, String> hashToId,
                         Set<String> persistedHashes) {
-        System.out.println("[MySQLMetadataManager] 正在从数据库恢复元数据...");
+        LOG.info("[MySQLMetadataManager] 正在从数据库恢复元数据...");
         int count = 0;
         
         String sql = "SELECT m.filename, m.file_hash, m.storage_id, l.datanode_addr " +
@@ -88,11 +92,10 @@ public class MySQLMetadataManager extends MetadataManager {
                 count++;
             }
         } catch (SQLException e) {
-            e.printStackTrace();
-            System.err.println("[MySQLMetadataManager] 恢复失败: " + e.getMessage());
+            LOG.error("[MySQLMetadataManager] 恢复失败", e);
         }
         
-        System.out.println("[MySQLMetadataManager] 恢复完成，共加载 " + count + " 条记录");
+        LOG.info("[MySQLMetadataManager] 恢复完成，共加载 {} 条记录", count);
     }
 
     @Override
@@ -125,8 +128,7 @@ public class MySQLMetadataManager extends MetadataManager {
                 throw e;
             }
         } catch (SQLException e) {
-            e.printStackTrace();
-            System.err.println("[MySQLMetadataManager] 写入数据库失败: " + e.getMessage());
+            LOG.error("[MySQLMetadataManager] 写入数据库失败", e);
         }
     }
 }

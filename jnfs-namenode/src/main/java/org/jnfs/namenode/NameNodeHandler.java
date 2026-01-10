@@ -2,16 +2,17 @@ package org.jnfs.namenode;
 
 import cn.hutool.cache.CacheUtil;
 import cn.hutool.cache.impl.TimedCache;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.Packet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-
-import io.netty.channel.ChannelHandler;
 
 /**
  * NameNode 业务处理器
@@ -22,6 +23,8 @@ import io.netty.channel.ChannelHandler;
  */
 @ChannelHandler.Sharable
 public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
+
+    private static final Logger LOG = LoggerFactory.getLogger(NameNodeHandler.class);
 
     private static final String VALID_TOKEN = "jnfs-secure-token-2025";
 
@@ -88,7 +91,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exception {
         if (!validateToken(packet.getToken())) {
-            System.out.println("安全拦截: 无效的 Token - " + ctx.channel().remoteAddress());
+            LOG.warn("安全拦截: 无效的 Token - {}", ctx.channel().remoteAddress());
             sendResponse(ctx, CommandType.ERROR, "Authentication Failed: Invalid Token".getBytes(StandardCharsets.UTF_8));
             return;
         }
@@ -124,7 +127,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         String storageAddr = hashToStorage.get(hash);
 
         if (storageAddr != null) {
-            System.out.println("命中秒传: Hash=" + hash);
+            LOG.info("命中秒传: Hash={}", hash);
             sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, storageAddr.getBytes(StandardCharsets.UTF_8));
         } else {
             sendResponse(ctx, CommandType.NAMENODE_RESPONSE_NOT_EXIST, "Not Found".getBytes(StandardCharsets.UTF_8));
@@ -142,13 +145,13 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             }
 
             if (pendingUploads.containsKey(hash)) {
-                System.out.println("并发上传冲突，通知等待: Hash=" + hash);
+                LOG.info("并发上传冲突，通知等待: Hash={}", hash);
                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_WAIT, "Waiting".getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
             pendingUploads.put(hash, true);
-            System.out.println("允许上传: Hash=" + hash);
+            LOG.info("允许上传: Hash={}", hash);
             sendResponse(ctx, CommandType.NAMENODE_RESPONSE_ALLOW, "OK".getBytes(StandardCharsets.UTF_8));
         }
     }
@@ -187,7 +190,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         if (persistedHashes.contains(hash)) {
              storageId = hashToId.get(hash);
              if (storageId != null) {
-                 System.out.println("忽略重复元数据提交 (ID已持久化): " + filename);
+                 LOG.info("忽略重复元数据提交 (ID已持久化): {}", filename);
                  sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
                  return;
              }
@@ -220,7 +223,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
             persistedHashes.add(hash);
 
-            System.out.println("文件已注册并持久化: " + filename + ", ID: " + storageId);
+            LOG.info("文件已注册并持久化: {}, ID: {}", filename, storageId);
         }
 
         sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
@@ -259,7 +262,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        cause.printStackTrace();
+        LOG.error("NameNodeHandler异常", cause);
         ctx.close();
     }
 }

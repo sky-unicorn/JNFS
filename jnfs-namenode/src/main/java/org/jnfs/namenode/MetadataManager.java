@@ -1,5 +1,8 @@
 package org.jnfs.namenode;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.*;
 import java.util.Map;
 import java.util.Set;
@@ -10,6 +13,8 @@ import java.util.UUID;
  * 负责元数据的持久化存储 (Write-Ahead Log / Append Only Log) 和恢复
  */
 public class MetadataManager {
+
+    private static final Logger LOG = LoggerFactory.getLogger(MetadataManager.class);
 
     private static final String METADATA_FILE = "namenode_meta.log";
     private final File logFile;
@@ -31,11 +36,11 @@ public class MetadataManager {
                         Map<String, String> hashToId,
                         Set<String> persistedHashes) {
         if (!logFile.exists()) {
-            System.out.println("[MetadataManager] 元数据日志不存在，启动为空状态");
+            LOG.info("[MetadataManager] 元数据日志不存在，启动为空状态");
             return;
         }
 
-        System.out.println("[MetadataManager] 正在恢复元数据...");
+        LOG.info("[MetadataManager] 正在恢复元数据...");
         int count = 0;
         try (BufferedReader reader = new BufferedReader(new FileReader(logFile))) {
             String line;
@@ -63,10 +68,9 @@ public class MetadataManager {
                 }
             }
         } catch (IOException e) {
-            e.printStackTrace();
-            System.err.println("[MetadataManager] 恢复元数据时发生错误: " + e.getMessage());
+            LOG.error("[MetadataManager] 恢复元数据时发生错误", e);
         }
-        System.out.println("[MetadataManager] 恢复完成，共加载 " + count + " 条记录");
+        LOG.info("[MetadataManager] 恢复完成，共加载 {} 条记录", count);
     }
 
     /**
@@ -80,8 +84,7 @@ public class MetadataManager {
             writer.newLine();
             writer.flush();
         } catch (IOException e) {
-            e.printStackTrace();
-            System.err.println("[MetadataManager] 写入元数据日志失败: " + e.getMessage());
+            LOG.error("[MetadataManager] 写入元数据日志失败", e);
         }
     }
 }

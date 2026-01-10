@@ -11,6 +11,8 @@ import org.jnfs.common.Packet;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
 import org.jnfs.driver.JNFSDriver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -30,17 +32,19 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class ExampleApp {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ExampleApp.class);
+
     private static final String CLIENT_TOKEN = "jnfs-secure-token-2025";
 
     public static void main(String[] args) {
-        System.out.println("=== JNFS 综合测试工具 ===");
-        System.out.println("1. 标准文件上传与下载测试 (Standard Test)");
-        System.out.println("2. 连接池并发测试 (Connection Pool Test)");
-        System.out.println("3. 路径遍历漏洞测试 (Path Traversal Security Test)");
-        System.out.println("4. 资源泄漏测试 (Connection Leak Test)");
-        System.out.println("5. NameNode分段锁并发测试 (NameNode Lock Test)");
-        System.out.println("6. DataNode重命名原子性模拟 (Rename Atomicity Simulation)");
-        System.out.print("请输入测试编号 [1-6]: ");
+        LOG.info("=== JNFS 综合测试工具 ===");
+        LOG.info("1. 标准文件上传与下载测试 (Standard Test)");
+        LOG.info("2. 连接池并发 (测试Connection Pool Test)");
+        LOG.info("3. 路径遍历漏洞测试 (Path Traversal Security Test)");
+        LOG.info("4. 资源泄漏测试 (Connection Leak Test)");
+        LOG.info("5. NameNode分段锁并发测试 (NameNode Lock Test)");
+        LOG.info("6. DataNode重命名原子性模拟 (Rename Atomicity Simulation)");
+        LOG.info("请输入测试编号 [1-6]: ");
 
         Scanner scanner = new Scanner(System.in);
         String choice = scanner.nextLine().trim();
@@ -66,11 +70,11 @@ public class ExampleApp {
                     runRenameAtomicityTest();
                     break;
                 default:
-                    System.out.println("无效的输入，默认运行标准测试");
+                    LOG.info("无效的输入，默认运行标准测试");
                     runStandardTest();
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            LOG.error("ExampleApp异常", e);
         } finally {
             scanner.close();
         }
@@ -84,10 +88,10 @@ public class ExampleApp {
             File file = new File(filePath);
 
             if (!file.exists()) {
-                System.out.println("警告: 未找到目标文件 " + filePath);
+                LOG.warn("警告: 未找到目标文件 {}", filePath);
                 file = new File("large_test.dat");
                 if (!file.exists()) {
-                    System.out.println("创建测试文件: " + file.getAbsolutePath());
+                    LOG.info("创建测试文件: {}", file.getAbsolutePath());
                     try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file, "rw")) {
                         raf.setLength(10 * 1024 * 1024); // 10 MB
                     }

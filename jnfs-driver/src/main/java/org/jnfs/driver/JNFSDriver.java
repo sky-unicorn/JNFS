@@ -14,18 +14,15 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.Future;
 import org.jnfs.common.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
+import java.io.*;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-
-import java.io.InputStream;
 
 /**
  * JNFS Driver (SDK)
@@ -34,6 +31,8 @@ import java.io.InputStream;
  * 升级：使用 Netty ChannelPool 复用 NameNode 连接
  */
 public class JNFSDriver {
+
+    private static final Logger LOG = LoggerFactory.getLogger(JNFSDriver.class);
 
     private static final String CLIENT_TOKEN = "jnfs-secure-token-2025";
 
@@ -164,15 +163,15 @@ public class JNFSDriver {
                             }
                         }
                     }
-                    System.out.println("[Driver] 从 Registry (" + registryAddr + ") 刷新 NameNode 列表: " + nameNodes);
+                    LOG.info("[Driver] 从 Registry ({}) 刷新 NameNode 列表: {}", registryAddr, nameNodes);
                     // 成功后跳出循环，不再尝试其他 Registry
                     return;
                 }
             } catch (Exception e) {
-                System.err.println("[Driver] 连接 Registry (" + registryAddr + ") 失败，尝试下一个...");
+                LOG.warn("[Driver] 连接 Registry ({}) 失败，尝试下一个...", registryAddr);
             }
         }
-        System.err.println("[Driver] 无法连接任何 Registry，刷新 NameNode 失败");
+        LOG.error("[Driver] 无法连接任何 Registry，刷新 NameNode 失败");
     }
 
     public void close() {
@@ -207,7 +206,7 @@ public class JNFSDriver {
      * 上传文件 (InputStream 模式)
      * 适用于 Web 上传 (MultipartFile.getInputStream) 或其他流式输入
      * 注意：此方法会先将流写入临时文件以计算 Hash 和支持零拷贝上传
-     * 
+     *
      * @param in 输入流
      * @param filename 文件名
      * @return storageId
@@ -239,41 +238,41 @@ public class JNFSDriver {
             throw new IOException("文件不存在: " + file.getAbsolutePath());
         }
 
-        System.out.println("[Driver] 正在计算文件摘要...");
+        LOG.info("[Driver] 正在计算文件摘要...");
         String fileHash = DigestUtil.sha256Hex(file);
-        System.out.println("[Driver] 文件摘要 (SHA256): " + fileHash);
+        LOG.info("[Driver] 文件摘要 (SHA256): {}", fileHash);
 
         String existingAddr = requestUploadPermission(fileHash);
 
         if (existingAddr != null) {
-            System.out.println("[Driver] 发现相同文件 (节点: " + existingAddr + ")，触发秒传...");
+            LOG.info("[Driver] 发现相同文件 (节点: {})，触发秒传...", existingAddr);
             String storageId = commitFile(file.getName(), fileHash, existingAddr);
-            System.out.println("[Driver] 秒传成功！存储编号: " + storageId);
+            LOG.info("[Driver] 秒传成功！存储编号: {}", storageId);
             return storageId;
         }
 
         // --- 加密环节 ---
-        System.out.println("[Driver] 正在对文件进行本地加密...");
+        LOG.info("[Driver] 正在对文件进行本地加密...");
         File encryptedFile = new File(file.getParent(), file.getName() + ".enc");
         SecurityUtil.encryptFile(file, encryptedFile);
-        System.out.println("[Driver] 加密完成，准备上传密文");
+        LOG.info("[Driver] 加密完成，准备上传密文");
 
         try {
-            System.out.println("[Driver] 获得上传许可，开始上传...");
+            LOG.info("[Driver] 获得上传许可，开始上传...");
 
             String dataNodeAddr = getDataNodeForUpload();
-            System.out.println("[Driver] 获得上传节点: " + dataNodeAddr);
+            LOG.info("[Driver] 获得上传节点: {}", dataNodeAddr);
 
             String[] parts = dataNodeAddr.split(":");
             String dnHost = parts[0];
             int dnPort = Integer.parseInt(parts[1]);
 
-            // 上传密文，但使用原始文件的 Hash (用于秒传和校验)
+            // 上传密文，使用但原始文件的 Hash (用于秒传和校验)
             uploadToDataNode(dnHost, dnPort, encryptedFile, fileHash);
-            System.out.println("[Driver] 文件数据传输完成");
+            LOG.info("[Driver] 文件数据传输完成");
 
             String storageId = commitFile(file.getName(), fileHash, dataNodeAddr);
-            System.out.println("[Driver] 文件元数据提交完成，存储编号: " + storageId);
+            LOG.info("[Driver] 文件元数据提交完成，存储编号: {}", storageId);
 
             return storageId;
         } finally {
@@ -293,7 +292,7 @@ public class JNFSDriver {
      */
     public File downloadFile(String storageId, String targetPath) throws Exception {
         String locInfo = getDownloadLocation(storageId);
-        System.out.println("[Driver] 获取下载信息: " + locInfo);
+        LOG.info("[Driver] 获取下载信息: {}", locInfo);
 
         String[] parts = locInfo.split("\\|");
         if (parts.length != 3) {
@@ -334,9 +333,9 @@ public class JNFSDriver {
         // File encryptedFile = new File(targetFile.getParentFile(), targetFile.getName() + ".enc");
 
         // DataNode 存储的是 Hash 命名的文件 (假设 DataNode 已按 Hash 存储)
-        // 支持流式解密，直接下载到目标文件
+        //支持 流式解密，直接下载到目标文件
         downloadFromDataNode(dnHost, dnPort, hash, targetFile);
-        System.out.println("[Driver] 下载并解密完成: " + targetFile.getAbsolutePath());
+        LOG.info("[Driver] 下载并解密完成: {}", targetFile.getAbsolutePath());
 
         /*
         // --- 解密环节 (已改为流式解密，不再需要后续步骤) ---
@@ -366,7 +365,7 @@ public class JNFSDriver {
             } else if (type == CommandType.NAMENODE_RESPONSE_EXIST) {
                 return new String(response.getData(), StandardCharsets.UTF_8);
             } else if (type == CommandType.NAMENODE_RESPONSE_WAIT) {
-                System.out.println("[Driver] 文件正在上传中，等待重试...");
+                LOG.info("[Driver] 文件正在上传中，等待重试...");
                 Thread.sleep(1000);
             } else if (type == CommandType.ERROR) {
                 throw new IOException("错误: " + new String(response.getData(), StandardCharsets.UTF_8));
@@ -489,7 +488,7 @@ public class JNFSDriver {
             try {
                 return doSendRequest(address, type, data);
             } catch (Exception e) {
-                System.err.println("[Driver] 连接 NameNode (" + address + ") 失败: " + e.getMessage() + "，尝试下一个...");
+                LOG.warn("[Driver] 连接 NameNode ({}) 失败: {}，尝试下一个...", address, e.getMessage());
                 lastException = e;
                 attempts++;
             }
@@ -559,7 +558,7 @@ public class JNFSDriver {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            cause.printStackTrace();
+            LOG.error("ConnectionHandler异常", cause);
             ctx.close();
         }
     }
@@ -630,7 +629,7 @@ public class JNFSDriver {
                 }
                 // 使用 SecurityUtil 创建流式解密输出流
                 this.out = SecurityUtil.createDecryptOutputStream(new FileOutputStream(targetFile));
-                System.out.println("[Driver] 开始接收文件流，大小: " + fileSize);
+                LOG.info("[Driver] 开始接收文件流，大小: {}", fileSize);
 
             } else if (msg instanceof ByteBuf) {
                 // 处理文件流数据
@@ -642,7 +641,7 @@ public class JNFSDriver {
                     receivedBytes += bytes.length;
 
                     if (receivedBytes >= fileSize) {
-                        System.out.println("[Driver] 下载完成");
+                        LOG.info("[Driver] 下载完成");
                         closeFile();
                         completionSignal.offer(true);
                     }
@@ -656,7 +655,7 @@ public class JNFSDriver {
                      out.close();
                  }
              } catch (IOException e) {
-                 e.printStackTrace();
+                 LOG.error("关闭文件输出流失败", e);
              } finally {
                  out = null;
              }
@@ -671,7 +670,7 @@ public class JNFSDriver {
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            cause.printStackTrace();
+            LOG.error("DownloadHandler异常", cause);
             closeFile();
             ctx.close();
             completionSignal.offer(false);

@@ -1,6 +1,8 @@
 package org.jnfs.common;
 
 import org.yaml.snakeyaml.Yaml;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.InputStream;
 import java.net.InetSocketAddress;
@@ -15,6 +17,8 @@ import java.util.Map;
  */
 public class ConfigUtil {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ConfigUtil.class);
+
     /**
      * 加载 YAML 配置文件
      * 优先从运行目录查找，如果没有则从 classpath 加载
@@ -25,17 +29,17 @@ public class ConfigUtil {
         // 1. 尝试从外部运行目录加载 (便于生产环境修改配置)
         try {
             if (Files.exists(Paths.get(fileName))) {
-                System.out.println("加载外部配置文件: " + fileName);
+                LOG.info("加载外部配置文件: {}", fileName);
                 try (InputStream in = Files.newInputStream(Paths.get(fileName))) {
                     return yaml.load(in);
                 }
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            LOG.error("加载外部配置文件失败", e);
         }
 
         // 2. 尝试从 classpath 加载
-        System.out.println("加载 Classpath 配置文件: " + fileName);
+        LOG.info("加载 Classpath 配置文件: {}", fileName);
         try (InputStream in = ConfigUtil.class.getClassLoader().getResourceAsStream(fileName)) {
             if (in == null) {
                 throw new RuntimeException("找不到配置文件: " + fileName);
@@ -94,7 +98,7 @@ public class ConfigUtil {
                 list.add(new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
             }
         } catch (Exception e) {
-            System.err.println("解析注册中心地址失败: " + addr);
+            LOG.warn("解析注册中心地址失败: {}", addr);
         }
     }
 }
