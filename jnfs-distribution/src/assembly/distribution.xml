@@ -13,7 +13,13 @@
         <dependencySet>
             <outputDirectory>lib</outputDirectory>
             <useProjectArtifact>false</useProjectArtifact>
+            <useTransitiveDependencies>false</useTransitiveDependencies>
             <scope>runtime</scope>
+            <includes>
+                <include>org.jnfs:jnfs-registry</include>
+                <include>org.jnfs:jnfs-namenode</include>
+                <include>org.jnfs:jnfs-datanode</include>
+            </includes>
         </dependencySet>
     </dependencySets>
 
