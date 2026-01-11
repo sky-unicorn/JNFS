@@ -31,6 +31,6 @@ if "%SERVICE%"=="registry" (
 )
 
 echo Starting %SERVICE%...
-java -cp "%CONF_DIR%;%LIB_DIR%\*" %MAIN_CLASS%
+java -DAPP_HOME="%APP_HOME%" -Dlogback.configurationFile="%CONF_DIR%\logback-%SERVICE%.xml" -cp "%CONF_DIR%;%LIB_DIR%\*" %MAIN_CLASS%
 
 endlocal

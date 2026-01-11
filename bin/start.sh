@@ -37,4 +37,4 @@ fi
 
 # 运行 Java 程序
 # 注意: Linux 下 classpath 分隔符是 :
-java -cp "$CONF_DIR:$LIB_DIR/*" "$MAIN_CLASS"
+java -DAPP_HOME="$APP_HOME" -Dlogback.configurationFile="$CONF_DIR/logback-${SERVICE}.xml" -cp "$CONF_DIR:$LIB_DIR/*" "$MAIN_CLASS"
