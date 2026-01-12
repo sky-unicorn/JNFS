@@ -449,26 +449,32 @@ public class JNFSDriver {
         ChannelFuture f = b.connect(host, port).sync();
         Channel channel = f.channel();
 
-        long fileSize = file.length();
-        // 关键修改: 上传时不再传文件名，而是传 Hash，作为 DataNode 的存储文件名
-        byte[] hashBytes = hash.getBytes(StandardCharsets.UTF_8);
+        try {
+            long fileSize = file.length();
+            // 关键修改: 上传时不再传文件名，而是传 Hash，作为 DataNode 的存储文件名
+            byte[] hashBytes = hash.getBytes(StandardCharsets.UTF_8);
 
-        Packet packet = new Packet();
-        packet.setCommandType(CommandType.UPLOAD_REQUEST);
-        packet.setToken(CLIENT_TOKEN);
-        packet.setData(hashBytes);
-        packet.setStreamLength(fileSize);
+            Packet packet = new Packet();
+            packet.setCommandType(CommandType.UPLOAD_REQUEST);
+            packet.setToken(CLIENT_TOKEN);
+            packet.setData(hashBytes);
+            packet.setStreamLength(fileSize);
 
-        channel.write(packet);
-        channel.write(new DefaultFileRegion(file, 0, fileSize));
-        channel.flush();
+            channel.write(packet);
+            channel.write(new DefaultFileRegion(file, 0, fileSize));
+            channel.flush();
 
-        Packet response = handler.getResponse();
-        if (response.getCommandType() == CommandType.ERROR) {
-            throw new IOException("DataNode 上传失败: " + new String(response.getData(), StandardCharsets.UTF_8));
+            // 动态计算超时时间：基础 60秒 + (文件大小 / 50KB/s)
+            // 假设最差网络环境 50KB/s，确保大文件有足够时间传输
+            long timeoutSeconds = 60 + (fileSize / 51200);
+
+            Packet response = handler.getResponse(timeoutSeconds, TimeUnit.SECONDS);
+            if (response.getCommandType() == CommandType.ERROR) {
+                throw new IOException("DataNode 上传失败: " + new String(response.getData(), StandardCharsets.UTF_8));
+            }
+        } finally {
+            channel.close().sync();
         }
-
-        channel.close().sync();
     }
 
     private void downloadFromDataNode(String host, int port, String hash, File targetFile) throws Exception {
@@ -555,7 +561,8 @@ public class JNFSDriver {
 
             channel.writeAndFlush(packet);
 
-            return handler.getResponse();
+            // NameNode 响应通常较快，设置 10 秒超时
+            return handler.getResponse(10, TimeUnit.SECONDS);
         } finally {
             try {
                 if (channel.pipeline().get("syncHandler") != null) {
@@ -583,8 +590,8 @@ public class JNFSDriver {
             queue.offer(msg);
         }
 
-        public Packet getResponse() throws InterruptedException {
-            Packet p = queue.poll(10, TimeUnit.SECONDS);
+        public Packet getResponse(long timeout, TimeUnit unit) throws InterruptedException {
+            Packet p = queue.poll(timeout, unit);
             if (p == null) {
                 throw new RuntimeException("等待响应超时");
             }
