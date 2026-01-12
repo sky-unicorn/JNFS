@@ -135,8 +135,20 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         }
     }
 
-    // 文件锁对象，用于同步文件操作
-    private static final Object FILE_LOCK = new Object();
+    // 锁分段数组，用于减小锁粒度 (128个分段锁)，替代原有的全局锁
+    private static final Object[] SEGMENT_LOCKS = new Object[128];
+    static {
+        for (int i = 0; i < SEGMENT_LOCKS.length; i++) {
+            SEGMENT_LOCKS[i] = new Object();
+        }
+    }
+
+    /**
+     * 获取分段锁
+     */
+    private Object getLock(String key) {
+        return SEGMENT_LOCKS[Math.abs(key.hashCode() % SEGMENT_LOCKS.length)];
+    }
 
     private void finishUpload(ChannelHandlerContext ctx) {
         closeCurrentFile();
@@ -153,8 +165,8 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             return;
         }
 
-        // 引入文件锁，确保存在性检查和重命名操作的原子性
-        synchronized (FILE_LOCK) {
+        // 使用分段锁，仅锁定当前文件 Hash 对应的分段，避免全局竞争
+        synchronized (getLock(currentFileName)) {
             // 如果目标文件已存在，直接删除临时文件并返回成功 (视为幂等上传)
             if (finalFile.exists()) {
                 LOG.info("文件已存在，跳过重命名: {}", currentFileName);
