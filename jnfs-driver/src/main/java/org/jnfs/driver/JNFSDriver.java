@@ -47,6 +47,7 @@ public class JNFSDriver {
     // NameNode 列表 (Registry 模式下使用)
     private final List<InetSocketAddress> nameNodes = new CopyOnWriteArrayList<>();
     private final AtomicInteger nextNameNodeIndex = new AtomicInteger(0);
+    private ScheduledExecutorService scheduler;
 
     // 连接池映射: Address -> Pool
     private final ChannelPoolMap<InetSocketAddress, SimpleChannelPool> poolMap;
@@ -144,12 +145,12 @@ public class JNFSDriver {
     }
 
     private void startNameNodeRefreshThread() {
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "Driver-Refresh");
             t.setDaemon(true);
             return t;
         });
-        scheduler.scheduleAtFixedRate(this::refreshNameNodes, 10, 10, TimeUnit.SECONDS);
+        this.scheduler.scheduleAtFixedRate(this::refreshNameNodes, 10, 10, TimeUnit.SECONDS);
     }
 
     private void refreshNameNodes() {
@@ -205,6 +206,16 @@ public class JNFSDriver {
     }
 
     public void close() {
+        if (scheduler != null && !scheduler.isShutdown()) {
+            scheduler.shutdownNow();
+        }
+        if (poolMap instanceof Closeable) {
+            try {
+                ((Closeable) poolMap).close();
+            } catch (Exception e) {
+                // ignore
+            }
+        }
         group.shutdownGracefully();
     }
 
