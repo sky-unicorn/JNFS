@@ -79,6 +79,21 @@ mvn clean package -Pdist
    ```
    *运行交互式测试控制台，包含上传、下载、并发、安全等测试场景。*
 
+### ⚠️ 集群部署特别说明
+
+若需部署 **NameNode 集群** (多实例运行)，请严格遵守以下约束：
+
+1. **元数据存储必须使用 MySQL**:
+   - 必须在 `conf/namenode.yml` 中设置 `metadata.mode: mysql`。
+   - ❌ **严禁使用 `file` 模式**：`file` 模式仅将元数据存储在各节点的本地磁盘，会导致集群脑裂、数据不一致。
+   - 所有 NameNode 节点必须配置连接到**同一个** MySQL 数据库实例。
+
+2. **分布式协同**:
+   - MySQL 模式下，系统会自动启用基于数据库的分布式锁 (`file_upload_lock` 表)，确保文件上传时的并发安全。
+
+3. **注册中心高可用**:
+   - 客户端和服务端配置 `registry.addresses` 时，建议填写所有 Registry 节点的地址 (逗号分隔)，以实现自动故障切换。
+
 ### 4. SDK 使用示例
 JNFS 提供了灵活的 Java SDK，支持**单点直连**和**集群发现**两种模式。
 
@@ -167,9 +182,20 @@ registry:
   # 方式 2: 集群配置 (推荐)
   addresses: localhost:5367,localhost:5368
   
-# 元数据持久化配置 (支持 FILE 或 MYSQL)
+# 元数据存储配置
 metadata:
-  type: FILE 
+  # 存储模式:
+  # - file: 本地文件存储 (仅适合单机部署，无法共享元数据)
+  # - mysql: 数据库存储 (集群模式下必须使用 mysql，否则各节点元数据不一致且无法协同)
+  mode: file 
+
+  # MySQL 连接配置 (当 mode: mysql 时生效)
+  mysql:
+    host: localhost
+    port: 3306
+    database: jnfs
+    user: root
+    password: password
 ```
 
 ### registry.yml (Registry 配置)
