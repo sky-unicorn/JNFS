@@ -53,6 +53,18 @@ CREATE TABLE `file_metadata`  (
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '文件元数据表' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
+-- Table structure for file_upload_lock
+-- ----------------------------
+DROP TABLE IF EXISTS `file_upload_lock`;
+CREATE TABLE `file_upload_lock` (
+  `file_hash` char(64) NOT NULL COMMENT '锁Key：文件的Hash值',
+  `namenode_id` varchar(64) NOT NULL COMMENT '持有锁的服务节点标识',
+  `expire_time` datetime NOT NULL COMMENT '锁过期时间(防止死锁)',
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`file_hash`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件上传分布式锁表';
+
+-- ----------------------------
 -- Records of file_metadata
 -- ----------------------------
 

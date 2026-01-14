@@ -87,4 +87,31 @@ public class MetadataManager {
             LOG.error("[MetadataManager] 写入元数据日志失败", e);
         }
     }
+
+    /**
+     * 尝试获取文件上传锁 (用于集群协同)
+     * @param hash 文件Hash
+     * @param nodeId 节点标识
+     * @return true=获取成功, false=已被锁定
+     */
+    public boolean tryAcquireUploadLock(String hash, String nodeId) {
+        return true; // 默认文件模式无需分布式锁，直接返回成功 (依靠本地内存锁)
+    }
+
+    /**
+     * 释放文件上传锁
+     * @param hash 文件Hash
+     */
+    public void releaseUploadLock(String hash) {
+        // 默认不操作
+    }
+
+    /**
+     * 检查文件是否存在 (用于集群协同)
+     * @param hash 文件Hash
+     * @return true=存在
+     */
+    public boolean isFileExist(String hash) {
+        return false; // 默认仅依赖内存检查，返回false让上层检查内存
+    }
 }

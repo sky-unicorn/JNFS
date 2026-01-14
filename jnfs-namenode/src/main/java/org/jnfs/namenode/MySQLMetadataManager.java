@@ -56,8 +56,75 @@ public class MySQLMetadataManager extends MetadataManager {
                 "UNIQUE KEY `uk_hash_node` (`file_hash`, `datanode_addr`)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
             );
+            // file_upload_lock
+            conn.createStatement().execute(
+                "CREATE TABLE IF NOT EXISTS `file_upload_lock` (" +
+                "`file_hash` CHAR(64) NOT NULL," +
+                "`namenode_id` VARCHAR(64) NOT NULL," +
+                "`expire_time` DATETIME NOT NULL," +
+                "`create_time` DATETIME DEFAULT CURRENT_TIMESTAMP," +
+                "PRIMARY KEY (`file_hash`)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            );
         } catch (SQLException e) {
             LOG.error("创建数据库表失败", e);
+        }
+    }
+
+    @Override
+    public boolean isFileExist(String hash) {
+        String sql = "SELECT 1 FROM file_metadata WHERE file_hash = ? LIMIT 1";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, hash);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next();
+            }
+        } catch (SQLException e) {
+            LOG.error("[MySQLMetadataManager] 检查文件存在失败", e);
+            return false;
+        }
+    }
+
+    @Override
+    public boolean tryAcquireUploadLock(String hash, String nodeId) {
+        String deleteSql = "DELETE FROM file_upload_lock WHERE file_hash = ? AND expire_time < NOW()";
+        String insertSql = "INSERT INTO file_upload_lock (file_hash, namenode_id, expire_time) VALUES (?, ?, ?)";
+
+        try (Connection conn = dataSource.getConnection()) {
+            // 1. 清理过期锁
+            try (PreparedStatement stmt = conn.prepareStatement(deleteSql)) {
+                stmt.setString(1, hash);
+                stmt.executeUpdate();
+            }
+
+            // 2. 尝试获取锁 (30分钟过期)
+            try (PreparedStatement stmt = conn.prepareStatement(insertSql)) {
+                stmt.setString(1, hash);
+                stmt.setString(2, nodeId);
+                stmt.setTimestamp(3, new java.sql.Timestamp(System.currentTimeMillis() + 30 * 60 * 1000));
+                stmt.executeUpdate();
+                return true;
+            }
+        } catch (SQLException e) {
+            // Duplicate entry error code for MySQL is 1062
+            if (e.getErrorCode() == 1062) { 
+                return false;
+            }
+            LOG.error("[MySQLMetadataManager] 获取锁失败", e);
+            return false;
+        }
+    }
+
+    @Override
+    public void releaseUploadLock(String hash) {
+        String sql = "DELETE FROM file_upload_lock WHERE file_hash = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, hash);
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            LOG.error("[MySQLMetadataManager] 释放锁失败", e);
         }
     }
 
@@ -119,6 +186,13 @@ public class MySQLMetadataManager extends MetadataManager {
                 try (PreparedStatement stmt = conn.prepareStatement(sqlLoc)) {
                     stmt.setString(1, hash);
                     stmt.setString(2, address);
+                    stmt.executeUpdate();
+                }
+
+                // 3. 删除锁 (确保原子性)
+                String sqlUnlock = "DELETE FROM file_upload_lock WHERE file_hash = ?";
+                try (PreparedStatement stmt = conn.prepareStatement(sqlUnlock)) {
+                    stmt.setString(1, hash);
                     stmt.executeUpdate();
                 }
                 

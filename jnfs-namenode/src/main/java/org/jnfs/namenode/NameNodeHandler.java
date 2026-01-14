@@ -39,6 +39,9 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     // 过期时间设置为 10 分钟 (600,000 ms)
     private static final TimedCache<String, Boolean> pendingUploads = CacheUtil.newTimedCache(10 * 60 * 1000);
 
+    // NameNode 唯一标识 (用于分布式锁)
+    private static final String NODE_ID = UUID.randomUUID().toString();
+
     static {
         // 启动定时清理任务，每分钟检查一次过期
         pendingUploads.schedulePrune(60 * 1000);
@@ -144,8 +147,30 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
                 return;
             }
 
+            // 集群协同检查 (仅在 MySQL 模式下有效)
+            if (metadataManager != null) {
+                // 1. 检查集群中是否已存在 (防止多节点重复上传)
+                if (metadataManager.isFileExist(hash)) {
+                    LOG.info("集群中已存在文件: Hash={}", hash);
+                    // 注意: 此时无法获取具体 DataNode 地址，返回占位符告知客户端秒传成功
+                    sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, "Cluster-Storage".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+
+                // 2. 尝试获取分布式锁
+                if (!metadataManager.tryAcquireUploadLock(hash, NODE_ID)) {
+                    LOG.info("获取集群锁失败 (正在上传中): Hash={}", hash);
+                    sendResponse(ctx, CommandType.NAMENODE_RESPONSE_WAIT, "Cluster-Waiting".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
+            }
+
             if (pendingUploads.containsKey(hash)) {
                 LOG.info("并发上传冲突，通知等待: Hash={}", hash);
+                // 回滚分布式锁
+                if (metadataManager != null) {
+                    metadataManager.releaseUploadLock(hash);
+                }
                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_WAIT, "Waiting".getBytes(StandardCharsets.UTF_8));
                 return;
             }
