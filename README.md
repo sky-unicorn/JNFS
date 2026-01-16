@@ -9,6 +9,7 @@ JNFS 是一个轻量级的、基于 Java Netty 实现的分布式文件系统。
   - **NameNode**: 管理文件元数据（文件名、Hash、位置）和负载均衡，支持分段锁高并发处理。
   - **DataNode**: 负责实际的数据块存储与读取，支持**多磁盘/多路径挂载**扩容。
   - **Registry**: 注册中心，负责 DataNode 的自动发现与心跳检测，具备自动过期清理机制。
+  - **Web Dashboard**: 提供可视化的集群监控页面，实时展示活跃节点和存储空间。
 - **智能传输**: 
   - **秒传**: 基于 SHA-256 实现文件去重，相同文件无需重复上传。
   - **流式传输**: 支持大文件流式读写，防止内存溢出。
@@ -38,9 +39,9 @@ JNFS 是一个轻量级的、基于 Java Netty 实现的分布式文件系统。
 - Maven 3.6+
 
 ### 2. 构建发布包
-在项目根目录下执行 Maven 打包命令 (使用 `dist` profile)：
+在项目根目录下执行 Maven 打包命令：
 ```bash
-mvn clean package -Pdist
+mvn clean package
 ```
 构建成功后，在 `jnfs-distribution/target` 目录下会生成最终的发布包：
 - `jnfs-dist-{version}.zip`
@@ -84,6 +85,7 @@ mvn clean package -Pdist
 若需部署 **NameNode 集群** (多实例运行)，请严格遵守以下约束：
 
 1. **元数据存储必须使用 MySQL**:
+   - **初始化数据库**: 将项目根目录下的 `mysql/jnfs.sql` 导入到 MySQL 数据库中。
    - 必须在 `conf/namenode.yml` 中设置 `metadata.mode: mysql`。
    - ❌ **严禁使用 `file` 模式**：`file` 模式仅将元数据存储在各节点的本地磁盘，会导致集群脑裂、数据不一致。
    - 所有 NameNode 节点必须配置连接到**同一个** MySQL 数据库实例。
