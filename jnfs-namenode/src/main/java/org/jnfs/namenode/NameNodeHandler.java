@@ -60,7 +60,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     private static final List<String> dataNodes = new ArrayList<>();
 
     // 负载均衡器
-    private static final LoadBalancer loadBalancer = new MaxFreeSpaceStrategy();
+    private static final LoadBalancer loadBalancer = new WeightedRandomStrategy();
 
     // 锁分段数组，用于减小锁粒度 (128个分段锁)
     private static final Object[] SEGMENT_LOCKS = new Object[128];
