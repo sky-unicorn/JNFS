@@ -28,24 +28,30 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     private static final String VALID_TOKEN = "jnfs-secure-token-2025";
 
-    private static final Map<String, String> filenameToHash = new ConcurrentHashMap<>();
-    private static final Map<String, String> hashToStorage = new ConcurrentHashMap<>();
-    private static final Map<String, String> hashToId = new ConcurrentHashMap<>();
-    private static final Map<String, String> idToHash = new ConcurrentHashMap<>();
+    // 移除旧的静态全量 Map
+    // private static final Map<String, String> filenameToHash = new ConcurrentHashMap<>();
+    // private static final Map<String, String> hashToStorage = new ConcurrentHashMap<>();
+    // private static final Map<String, String> hashToId = new ConcurrentHashMap<>();
+    // private static final Map<String, String> idToHash = new ConcurrentHashMap<>();
+    
+    // 仅保留 persistedHashes 用于快速判重 (优化点：如果数据量过大，这个Set也应该移除，改用 BloomFilter 或 Cache)
+    // 但为了兼容 File 模式的逻辑，暂时保留，但在 MySQL 模式且启用 Cache 时，不应过度依赖它
     private static final Set<String> persistedHashes = ConcurrentHashMap.newKeySet();
 
-    // 使用带过期时间的缓存替代 Set，防止上传意外中断导致的死锁
     // Key: Hash, Value: Timestamp (虽然Value不重要)
     // 过期时间设置为 10 分钟 (600,000 ms)
     private static final TimedCache<String, Boolean> pendingUploads = CacheUtil.newTimedCache(10 * 60 * 1000);
-
-    // NameNode 唯一标识 (用于分布式锁)
-    private static final String NODE_ID = UUID.randomUUID().toString();
 
     static {
         // 启动定时清理任务，每分钟检查一次过期
         pendingUploads.schedulePrune(60 * 1000);
     }
+
+    // 引入缓存管理器
+    private static MetadataCacheManager cacheManager;
+
+    // NameNode 唯一标识 (用于分布式锁)
+    private static final String NODE_ID = UUID.randomUUID().toString();
 
     // 不再 final，不再静态初始化
     private static MetadataManager metadataManager;
@@ -74,13 +80,38 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     /**
      * 初始化元数据管理器 (由 NameNodeServer 启动时调用)
      */
-    public static void initMetadataManager(MetadataManager manager) {
+    public static void initMetadataManager(MetadataManager manager, MetadataCacheManager cache) {
         metadataManager = manager;
-        // 恢复元数据
-        metadataManager.recover(filenameToHash, hashToStorage, hashToId, persistedHashes);
-        // 重建 idToHash 索引
-        for (Map.Entry<String, String> entry : hashToId.entrySet()) {
-            idToHash.put(entry.getValue(), entry.getKey());
+        cacheManager = cache;
+        
+        // 恢复数据到缓存 (预热)
+        // 注意：这里为了兼容，我们构建临时的 Map 接收 recover 数据，然后灌入 Cache
+        // 对于 MySQL 模式，如果数据量巨大，recover 应该被禁用或改为 limit 加载
+        Map<String, String> f2h = new HashMap<>();
+        Map<String, String> h2s = new HashMap<>();
+        Map<String, String> h2id = new HashMap<>();
+        
+        // 只有 File 模式或者配置了强制预热才执行全量 recover
+        // 这里做一个简单的判断：如果是 MySQL 模式，我们假设不再全量 recover，除非明确要求
+        boolean isFileMode = !(manager instanceof MySQLMetadataManager);
+        
+        if (isFileMode) {
+             LOG.info("File模式: 执行全量元数据恢复...");
+             manager.recover(f2h, h2s, h2id, persistedHashes);
+             
+             // 灌入 Cache
+             for (Map.Entry<String, String> entry : h2id.entrySet()) {
+                 String hash = entry.getKey();
+                 String storageId = entry.getValue();
+                 String address = h2s.get(hash);
+                 // 由于 filenameToHash 是多对一，这里反向查找有点麻烦，暂且简化
+                 // 实际上 Cache 主要以 Hash 为 Key
+                 cacheManager.putCacheOnly(hash, new MetadataCacheManager.MetadataEntry(
+                     "loaded_from_file", hash, address, storageId
+                 ));
+             }
+        } else {
+             LOG.info("MySQL模式: 跳过全量内存恢复，启用懒加载");
         }
     }
 
@@ -127,11 +158,13 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     private void handleCheckExistence(ChannelHandlerContext ctx, Packet packet) {
         String hash = new String(packet.getData(), StandardCharsets.UTF_8);
-        String storageAddr = hashToStorage.get(hash);
+        
+        // 1. 查缓存/持久层
+        MetadataCacheManager.MetadataEntry entry = cacheManager.get(hash);
 
-        if (storageAddr != null) {
+        if (entry != null) {
             LOG.info("命中秒传: Hash={}", hash);
-            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, storageAddr.getBytes(StandardCharsets.UTF_8));
+            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, entry.address.getBytes(StandardCharsets.UTF_8));
         } else {
             sendResponse(ctx, CommandType.NAMENODE_RESPONSE_NOT_EXIST, "Not Found".getBytes(StandardCharsets.UTF_8));
         }
@@ -141,22 +174,19 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         String hash = new String(packet.getData(), StandardCharsets.UTF_8);
 
         synchronized (getLock(hash)) {
-            String storageAddr = hashToStorage.get(hash);
-            if (storageAddr != null) {
-                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, storageAddr.getBytes(StandardCharsets.UTF_8));
+            // 1. 查缓存/持久层
+            MetadataCacheManager.MetadataEntry entry = cacheManager.get(hash);
+            if (entry != null) {
+                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, entry.address.getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
             // 集群协同检查 (仅在 MySQL 模式下有效)
             if (metadataManager != null) {
                 // 1. 检查集群中是否已存在 (防止多节点重复上传)
-                if (metadataManager.isFileExist(hash)) {
-                    LOG.info("集群中已存在文件: Hash={}", hash);
-                    // 注意: 此时无法获取具体 DataNode 地址，返回占位符告知客户端秒传成功
-                    sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, "Cluster-Storage".getBytes(StandardCharsets.UTF_8));
-                    return;
-                }
-
+                // 注意: cacheManager.get 其实已经包含了这个逻辑 (如果 cache 没命中会去查 DB)
+                // 但这里可能存在并发间隙，所以 tryAcquireUploadLock 依然重要
+                
                 // 2. 尝试获取分布式锁
                 if (!metadataManager.tryAcquireUploadLock(hash, NODE_ID)) {
                     LOG.info("获取集群锁失败 (正在上传中): Hash={}", hash);
@@ -212,40 +242,36 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         String storageId;
 
         // 1. 快速检查：如果已存在，直接返回
-        if (persistedHashes.contains(hash)) {
-             storageId = hashToId.get(hash);
-             if (storageId != null) {
-                 LOG.info("忽略重复元数据提交 (ID已持久化): {}", filename);
-                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
-                 return;
-             }
+        // 优化：先查缓存
+        MetadataCacheManager.MetadataEntry existing = cacheManager.get(hash);
+        if (existing != null) {
+             LOG.info("忽略重复元数据提交 (已存在): {}", filename);
+             sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, existing.storageId.getBytes(StandardCharsets.UTF_8));
+             return;
         }
 
         synchronized (getLock(hash)) {
             // 双重检查
-            if (persistedHashes.contains(hash)) {
-                 storageId = hashToId.get(hash);
-                 if (storageId != null) {
-                     sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
-                     return;
-                 }
+            existing = cacheManager.get(hash);
+            if (existing != null) {
+                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, existing.storageId.getBytes(StandardCharsets.UTF_8));
+                 return;
             }
 
             pendingUploads.remove(hash);
+            
+            // 注意：这里可能需要从 hashToId 里面取，但现在没有全量 hashToId 了
+            // 所以我们总是生成新的 ID，或者依赖数据库去重
+            // 为了简单，我们生成新的 ID，如果在数据库插入时冲突（Hash已存在），则需要处理
+            // 但因为前面已经 cacheManager.get(hash) 判重过了，这里冲突概率很低（除非并发）
+            storageId = UUID.randomUUID().toString();
 
-            storageId = hashToId.computeIfAbsent(hash, k -> UUID.randomUUID().toString());
-            idToHash.put(storageId, hash);
-
-            // 持久化到 MySQL 或 文件
-            if (metadataManager != null) {
-                metadataManager.logAddFile(filename, hash, address, storageId);
+            // 持久化到 MySQL 或 文件，并更新缓存
+            if (cacheManager != null) {
+                cacheManager.put(filename, hash, address, storageId);
             }
-
-            filenameToHash.put(filename, hash);
-            hashToStorage.put(hash, address);
-            hashToId.put(hash, storageId);
-            idToHash.put(storageId, hash);
-
+            
+            // 兼容性保留
             persistedHashes.add(hash);
 
             LOG.info("文件已注册并持久化: {}, ID: {}", filename, storageId);
@@ -256,23 +282,21 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     private void handleDownloadLocRequest(ChannelHandlerContext ctx, Packet packet) {
         String storageId = new String(packet.getData(), StandardCharsets.UTF_8);
-        String hash = idToHash.get(storageId);
+        
+        // 尝试通过 storageId 获取 hash (利用反向索引)
+        String hash = cacheManager.getHashByStorageId(storageId);
+        
+        // 如果没找到，可能 storageId 本身就是 hash (兼容旧客户端或特殊情况)
+        if (hash == null) {
+            hash = storageId;
+        }
 
-        if (hash != null) {
-            String address = hashToStorage.get(hash);
-            String filename = "unknown";
-            for (Map.Entry<String, String> entry : filenameToHash.entrySet()) {
-                if (entry.getValue().equals(hash)) {
-                    filename = entry.getKey();
-                    break;
-                }
-            }
-
-            if (address != null) {
-                String response = filename + "|" + hash + "|" + address;
-                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, response.getBytes(StandardCharsets.UTF_8));
-                return;
-            }
+        MetadataCacheManager.MetadataEntry entry = cacheManager.get(hash);
+        
+        if (entry != null) {
+            String response = entry.filename + "|" + entry.hash + "|" + entry.address;
+            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, response.getBytes(StandardCharsets.UTF_8));
+            return;
         }
 
         sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));

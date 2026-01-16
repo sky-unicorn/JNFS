@@ -24,6 +24,29 @@ public class MetadataManager {
     }
 
     /**
+     * 根据Hash查询元数据 (新增接口，用于按需加载)
+     * @param hash 文件Hash
+     * @return 元数据实体或null
+     */
+    public MetadataCacheManager.MetadataEntry queryByHash(String hash) {
+        // 默认实现：遍历全量恢复的内存Map (File模式下通常由Handler维护全量Map，这里暂不操作)
+        // 注意：由于 MetadataManager 基类原本只负责 IO，不负责持有数据，
+        // 在新架构下，File模式需要在这里实现简单的文件扫描或依赖外部索引。
+        // 为了简化 File 模式兼容性，我们假设 File 模式依然使用全量内存加载，
+        // 所以这个方法在 File 模式下可能不会被频繁调用，或者直接返回 null 让缓存层失效。
+        return null; 
+    }
+
+    /**
+     * 根据 StorageId 查询 Hash (新增接口，用于反向索引回源)
+     * @param storageId 存储ID
+     * @return 文件Hash或null
+     */
+    public String queryHashByStorageId(String storageId) {
+        return null; // 默认返回 null，子类覆盖
+    }
+
+    /**
      * 恢复元数据到内存
      * @param filenameToHash 文件名->Hash 映射
      * @param hashToStorage Hash->存储地址 映射

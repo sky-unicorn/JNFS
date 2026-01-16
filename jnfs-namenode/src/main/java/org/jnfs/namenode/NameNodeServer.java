@@ -169,9 +169,29 @@ public class NameNodeServer {
 
         // --- 初始化 MetadataManager ---
         MetadataManager metadataManager = null;
+        
+        // 缓存配置默认值
+        boolean cacheEnabled = true;
+        long cacheMaxSize = 100000L;
+        String cacheWritePolicy = "sync";
+
         if (config.containsKey("metadata")) {
             Map<String, Object> metaConfig = (Map<String, Object>) config.get("metadata");
             String mode = (String) metaConfig.getOrDefault("mode", "file");
+
+            // 读取缓存配置
+            if (metaConfig.containsKey("cache")) {
+                Map<String, Object> cacheConfig = (Map<String, Object>) metaConfig.get("cache");
+                cacheEnabled = (boolean) cacheConfig.getOrDefault("enabled", true);
+                // 处理 Integer 到 Long 的转换 (snakeyaml 可能返回 Integer)
+                Object maxSizeObj = cacheConfig.getOrDefault("max-size", 100000);
+                if (maxSizeObj instanceof Integer) {
+                    cacheMaxSize = ((Integer) maxSizeObj).longValue();
+                } else if (maxSizeObj instanceof Long) {
+                    cacheMaxSize = (Long) maxSizeObj;
+                }
+                cacheWritePolicy = (String) cacheConfig.getOrDefault("write-policy", "sync");
+            }
 
             if ("mysql".equalsIgnoreCase(mode)) {
                 LOG.info("使用 MySQL 元数据存储");
@@ -192,8 +212,11 @@ public class NameNodeServer {
             metadataManager = new MetadataManager();
         }
 
+        // --- 初始化 MetadataCacheManager ---
+        MetadataCacheManager cacheManager = new MetadataCacheManager(metadataManager, cacheEnabled, cacheMaxSize, cacheWritePolicy);
+
         // 注入到 Handler
-        NameNodeHandler.initMetadataManager(metadataManager);
+        NameNodeHandler.initMetadataManager(metadataManager, cacheManager);
 
         new NameNodeServer(port, advertisedHost, registryAddresses).run();
     }

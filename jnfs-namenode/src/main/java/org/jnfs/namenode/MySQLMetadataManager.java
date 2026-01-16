@@ -72,6 +72,49 @@ public class MySQLMetadataManager extends MetadataManager {
     }
 
     @Override
+    public MetadataCacheManager.MetadataEntry queryByHash(String hash) {
+        String sql = "SELECT m.filename, m.file_hash, m.storage_id, l.datanode_addr " +
+                     "FROM file_metadata m " +
+                     "JOIN file_location l ON m.file_hash = l.file_hash " +
+                     "WHERE m.file_hash = ? LIMIT 1";
+        
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, hash);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return new MetadataCacheManager.MetadataEntry(
+                        rs.getString("filename"),
+                        rs.getString("file_hash"),
+                        rs.getString("datanode_addr"),
+                        rs.getString("storage_id")
+                    );
+                }
+            }
+        } catch (SQLException e) {
+            LOG.error("[MySQLMetadataManager] 按Hash查询失败", e);
+        }
+        return null;
+    }
+
+    @Override
+    public String queryHashByStorageId(String storageId) {
+        String sql = "SELECT file_hash FROM file_metadata WHERE storage_id = ?";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, storageId);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getString("file_hash");
+                }
+            }
+        } catch (SQLException e) {
+            LOG.error("[MySQLMetadataManager] 按StorageId查询Hash失败", e);
+        }
+        return null;
+    }
+
+    @Override
     public boolean isFileExist(String hash) {
         String sql = "SELECT 1 FROM file_metadata WHERE file_hash = ? LIMIT 1";
         try (Connection conn = dataSource.getConnection();
