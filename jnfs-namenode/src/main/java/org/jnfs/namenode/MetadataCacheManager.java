@@ -116,7 +116,11 @@ public class MetadataCacheManager {
     public void put(String filename, String hash, String address, String storageId) {
         // 1. 先持久化
         // 目前仅实现同步写入 (Sync)，异步写入需引入队列和Worker
-        metadataManager.logAddFile(filename, hash, address, storageId);
+        try {
+            metadataManager.logAddFile(filename, hash, address, storageId);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("Metadata persistence failed", e);
+        }
 
         // 2. 更新缓存
         if (enabled) {

@@ -209,7 +209,7 @@ public class MySQLMetadataManager extends MetadataManager {
     }
 
     @Override
-    public void logAddFile(String filename, String hash, String address, String storageId) {
+    public void logAddFile(String filename, String hash, String address, String storageId) throws java.io.IOException {
         // 使用事务确保一致性
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
@@ -246,6 +246,7 @@ public class MySQLMetadataManager extends MetadataManager {
             }
         } catch (SQLException e) {
             LOG.error("[MySQLMetadataManager] 写入数据库失败", e);
+            throw new java.io.IOException("Database persistence failed", e);
         }
     }
 }

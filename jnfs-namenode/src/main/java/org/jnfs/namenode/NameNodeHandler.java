@@ -267,12 +267,22 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             storageId = UUID.randomUUID().toString();
 
             // 持久化到 MySQL 或 文件，并更新缓存
-            if (cacheManager != null) {
-                cacheManager.put(filename, hash, address, storageId);
+            try {
+                if (cacheManager != null) {
+                    cacheManager.put(filename, hash, address, storageId);
+                }
+            } catch (Exception e) {
+                LOG.error("元数据提交失败: {}", filename, e);
+                // [FIXED] Critical: 如果提交失败，必须释放分布式锁，否则用户需等待 30 分钟
+                if (metadataManager != null) {
+                    metadataManager.releaseUploadLock(hash);
+                }
+                sendResponse(ctx, CommandType.ERROR, "Metadata Persistence Failed".getBytes(StandardCharsets.UTF_8));
+                return;
             }
             
             // 兼容性保留
-            persistedHashes.add(hash);
+            // persistedHashes.add(hash); // [FIXED] Removed to prevent memory leak
 
             LOG.info("文件已注册并持久化: {}, ID: {}", filename, storageId);
         }

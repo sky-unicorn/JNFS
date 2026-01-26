@@ -99,15 +99,13 @@ public class MetadataManager {
     /**
      * 持久化记录一条新文件元数据
      */
-    public synchronized void logAddFile(String filename, String hash, String address, String storageId) {
+    public synchronized void logAddFile(String filename, String hash, String address, String storageId) throws IOException {
         String record = String.format("ADD|%s|%s|%s|%s", filename, hash, address, storageId);
 
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(logFile, true))) {
             writer.write(record);
             writer.newLine();
             writer.flush();
-        } catch (IOException e) {
-            LOG.error("[MetadataManager] 写入元数据日志失败", e);
         }
     }
 
