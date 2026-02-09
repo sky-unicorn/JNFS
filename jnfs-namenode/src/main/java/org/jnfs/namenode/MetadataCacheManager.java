@@ -17,7 +17,6 @@ public class MetadataCacheManager {
 
     // 缓存配置
     private final boolean enabled;
-    private final long maxSize;
 
     // 缓存容器
     // Key: Hash, Value: MetadataEntry (包含 filename, address, storageId)
@@ -33,7 +32,6 @@ public class MetadataCacheManager {
     public MetadataCacheManager(MetadataManager metadataManager, boolean enabled, long maxSize) {
         this.metadataManager = metadataManager;
         this.enabled = enabled;
-        this.maxSize = maxSize;
 
         if (enabled) {
             LOG.info("初始化元数据缓存: MaxSize={}", maxSize);
