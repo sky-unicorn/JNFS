@@ -57,7 +57,8 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     private static MetadataManager metadataManager;
 
     // 活跃的 DataNode 列表 (包含 freeSpace 信息)
-    private static final List<String> dataNodes = new ArrayList<>();
+    // 使用 volatile + Copy-On-Write 思想 (不可变快照) 解决并发读写问题
+    private static volatile List<String> dataNodes = Collections.emptyList();
 
     // 负载均衡器
     private static final LoadBalancer loadBalancer = new WeightedRandomStrategy();
@@ -116,9 +117,12 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     }
 
     public static void initDataNodes(List<String> nodes) {
-        dataNodes.clear();
-        if (nodes != null) {
-            dataNodes.addAll(nodes);
+        if (nodes == null || nodes.isEmpty()) {
+            dataNodes = Collections.emptyList();
+        } else {
+            // 生成新列表并设为不可变，替换引用 (Atomic Snapshot)
+            List<String> snapshot = new ArrayList<>(nodes);
+            dataNodes = Collections.unmodifiableList(snapshot);
         }
     }
 
