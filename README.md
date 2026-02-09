@@ -198,6 +198,14 @@ metadata:
     database: jnfs
     user: root
     password: password
+    
+  # 元数据缓存配置 (可选)
+  cache:
+    # 是否开启内存缓存 (默认: true)
+    enabled: true
+    # 缓存最大条目数 (默认: 100000)
+    # 根据 JVM 内存大小调整: 10w 条约占用 100MB 堆内存
+    max-size: 100000
 ```
 
 ### registry.yml (Registry 配置)
