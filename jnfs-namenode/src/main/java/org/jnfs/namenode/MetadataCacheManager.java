@@ -18,7 +18,6 @@ public class MetadataCacheManager {
     // 缓存配置
     private final boolean enabled;
     private final long maxSize;
-    private final String writePolicy; // sync 或 async
 
     // 缓存容器
     // Key: Hash, Value: MetadataEntry (包含 filename, address, storageId)
@@ -31,14 +30,13 @@ public class MetadataCacheManager {
     // 底层持久化管理器
     private final MetadataManager metadataManager;
 
-    public MetadataCacheManager(MetadataManager metadataManager, boolean enabled, long maxSize, String writePolicy) {
+    public MetadataCacheManager(MetadataManager metadataManager, boolean enabled, long maxSize) {
         this.metadataManager = metadataManager;
         this.enabled = enabled;
         this.maxSize = maxSize;
-        this.writePolicy = writePolicy;
 
         if (enabled) {
-            LOG.info("初始化元数据缓存: MaxSize={}, Policy={}", maxSize, writePolicy);
+            LOG.info("初始化元数据缓存: MaxSize={}", maxSize);
             this.metaCache = Caffeine.newBuilder()
                     .maximumSize(maxSize)
                     .recordStats() // 开启统计

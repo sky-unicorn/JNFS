@@ -39,5 +39,3 @@ metadata:
     # 缓存最大条目数 (默认: 100000)
     # 根据 JVM 内存大小调整: 10w 条约占用 100MB 堆内存
     max-size: 100000
-    # 写入策略: sync (同步持久化), async (异步持久化 - 暂未实现)
-    write-policy: sync

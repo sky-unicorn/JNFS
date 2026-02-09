@@ -173,7 +173,6 @@ public class NameNodeServer {
         // 缓存配置默认值
         boolean cacheEnabled = true;
         long cacheMaxSize = 100000L;
-        String cacheWritePolicy = "sync";
 
         if (config.containsKey("metadata")) {
             Map<String, Object> metaConfig = (Map<String, Object>) config.get("metadata");
@@ -190,7 +189,6 @@ public class NameNodeServer {
                 } else if (maxSizeObj instanceof Long) {
                     cacheMaxSize = (Long) maxSizeObj;
                 }
-                cacheWritePolicy = (String) cacheConfig.getOrDefault("write-policy", "sync");
             }
 
             if ("mysql".equalsIgnoreCase(mode)) {
@@ -213,7 +211,7 @@ public class NameNodeServer {
         }
 
         // --- 初始化 MetadataCacheManager ---
-        MetadataCacheManager cacheManager = new MetadataCacheManager(metadataManager, cacheEnabled, cacheMaxSize, cacheWritePolicy);
+        MetadataCacheManager cacheManager = new MetadataCacheManager(metadataManager, cacheEnabled, cacheMaxSize);
 
         // 注入到 Handler
         NameNodeHandler.initMetadataManager(metadataManager, cacheManager);
