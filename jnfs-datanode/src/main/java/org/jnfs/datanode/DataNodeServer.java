@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadFactory;
 
 /**
  * DataNode 服务启动类
@@ -55,6 +56,10 @@ public class DataNodeServer {
     private final EventLoopGroup workerGroup;
     // 连接池映射
     private final ChannelPoolMap<InetSocketAddress, SimpleChannelPool> registryPoolMap;
+
+    // 调度器 (使用 Daemon 线程)
+    private final ScheduledExecutorService heartbeatScheduler;
+    private final ScheduledExecutorService gcScheduler;
 
     public DataNodeServer(int port, String advertisedHost, List<String> storagePaths, List<InetSocketAddress> registryAddresses) {
         this.port = port;
@@ -79,7 +84,29 @@ public class DataNodeServer {
                 return new FixedChannelPool(b.remoteAddress(key), new RegistryChannelPoolHandler(), 10);
             }
         };
+
+        // 初始化调度器 (Daemon 线程)
+        this.heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "DataNode-Heartbeat");
+                t.setDaemon(true);
+                return t;
+            }
+        });
+
+        this.gcScheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "DataNode-GC");
+                t.setDaemon(true);
+                return t;
+            }
+        });
     }
+
+    // 运行标志
+    private volatile boolean running = true;
 
     public void run() throws Exception {
         // 启动后台线程负责注册和心跳
@@ -89,6 +116,12 @@ public class DataNodeServer {
 
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(32);
 
+        // 注册 Shutdown Hook (必须在 start 阻塞前注册)
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            LOG.info("Shutdown hook triggered...");
+            shutdown();
+        }));
+
         try {
             // 使用 NettyServerUtils 启动服务
             // 关键修复: 传入 Supplier 以便为每个连接创建新的 DataNodeHandler 实例
@@ -97,23 +130,50 @@ public class DataNodeServer {
                 () -> new DataNodeHandler(storagePaths),
                 businessGroup);
         } finally {
+            // 正常退出时的清理
+            shutdown();
             businessGroup.shutdownGracefully();
-            
-            // 关闭连接池资源
-            if (registryPoolMap instanceof Closeable) {
-                try {
-                    ((Closeable) registryPoolMap).close();
-                } catch (Exception e) {
-                    // ignore
-                }
-            }
-            workerGroup.shutdownGracefully();
         }
     }
 
+    /**
+     * 统一的资源释放方法，支持幂等调用
+     */
+    private void shutdown() {
+        if (!running) {
+            return;
+        }
+        running = false;
+        
+        LOG.info("正在停止 DataNodeServer 资源...");
+
+        // 关闭调度器
+        if (heartbeatScheduler != null && !heartbeatScheduler.isShutdown()) {
+            heartbeatScheduler.shutdownNow();
+        }
+        if (gcScheduler != null && !gcScheduler.isShutdown()) {
+            gcScheduler.shutdownNow();
+        }
+
+        // 关闭连接池资源
+        if (registryPoolMap instanceof Closeable) {
+            try {
+                ((Closeable) registryPoolMap).close();
+            } catch (Exception e) {
+                LOG.warn("关闭连接池失败: {}", e.getMessage());
+            }
+        }
+
+        // 关闭 Worker Group
+        if (workerGroup != null && !workerGroup.isShutdown()) {
+            workerGroup.shutdownGracefully();
+        }
+        
+        LOG.info("DataNodeServer 资源释放完成");
+    }
+
     private void startHeartbeatThread() {
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleAtFixedRate(() -> {
+        heartbeatScheduler.scheduleAtFixedRate(() -> {
             try {
                 sendHeartbeatToRegistry();
             } catch (Exception e) {
@@ -126,7 +186,6 @@ public class DataNodeServer {
      * 垃圾回收线程：定期扫描并删除过期的 .tmp 文件
      */
     private void startGarbageCollectorThread() {
-        ScheduledExecutorService gcScheduler = Executors.newSingleThreadScheduledExecutor();
         // 每 1 小时执行一次 GC (测试时可缩短)
         gcScheduler.scheduleAtFixedRate(() -> {
             LOG.info("[GC] 开始执行垃圾回收...");

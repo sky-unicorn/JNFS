@@ -29,6 +29,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.ThreadFactory;
 
 /**
  * NameNode 服务启动类
@@ -50,6 +51,10 @@ public class NameNodeServer {
     private final EventLoopGroup workerGroup;
     // 连接池映射
     private final ChannelPoolMap<InetSocketAddress, SimpleChannelPool> registryPoolMap;
+
+    // 调度器 (使用 Daemon 线程)
+    private final ScheduledExecutorService heartbeatScheduler;
+    private final ScheduledExecutorService discoveryScheduler;
 
     public NameNodeServer(int port, String advertisedHost, List<InetSocketAddress> registryAddresses) {
         this.port = port;
@@ -73,7 +78,29 @@ public class NameNodeServer {
                 return new FixedChannelPool(b.remoteAddress(key), new RegistryChannelPoolHandler(), 10);
             }
         };
+
+        // 初始化调度器 (Daemon 线程)
+        this.heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "NameNode-Heartbeat");
+                t.setDaemon(true);
+                return t;
+            }
+        });
+
+        this.discoveryScheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(r, "NameNode-Discovery");
+                t.setDaemon(true);
+                return t;
+            }
+        });
     }
+
+    // 运行标志
+    private volatile boolean running = true;
 
     public void run() throws Exception {
         // 启动后台线程定期从注册中心拉取 DataNode 列表
@@ -86,25 +113,62 @@ public class NameNodeServer {
         
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(16);
         
-        // 使用 NettyServerUtils 启动服务，传入共享 Handler
-        NettyServerUtils.start("NameNode", port, sharedHandler, businessGroup);
-        
-        // 优雅关闭 (虽然主线程会阻塞在 start 方法，但为了完整性)
+        // 注册 Shutdown Hook (必须在 start 阻塞前注册)
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            if (registryPoolMap instanceof Closeable) {
-                try {
-                    ((Closeable) registryPoolMap).close();
-                } catch (Exception e) {
-                    // ignore
-                }
-            }
-            workerGroup.shutdownGracefully();
+            LOG.info("Shutdown hook triggered...");
+            shutdown();
         }));
+        
+        try {
+            // 使用 NettyServerUtils 启动服务，传入共享 Handler
+            // 这会阻塞直到 Channel 关闭
+            NettyServerUtils.start("NameNode", port, sharedHandler, businessGroup);
+        } finally {
+            // 如果 NettyServerUtils.start 返回 (例如 Channel 关闭)，主动停止所有资源
+            shutdown();
+            // 确保业务线程组也关闭 (虽然 NettyServerUtils 可能会尝试关闭它，但这里作为兜底)
+            businessGroup.shutdownGracefully();
+        }
+    }
+    
+    /**
+     * 统一的资源释放方法，支持幂等调用
+     */
+    private void shutdown() {
+        if (!running) {
+            return;
+        }
+        running = false;
+        
+        LOG.info("正在停止 NameNodeServer 资源...");
+
+        // 关闭调度器
+        if (heartbeatScheduler != null && !heartbeatScheduler.isShutdown()) {
+            heartbeatScheduler.shutdownNow();
+        }
+        if (discoveryScheduler != null && !discoveryScheduler.isShutdown()) {
+            discoveryScheduler.shutdownNow();
+        }
+
+        // 关闭连接池
+        if (registryPoolMap instanceof Closeable) {
+            try {
+                ((Closeable) registryPoolMap).close();
+            } catch (Exception e) {
+                LOG.warn("关闭连接池失败: {}", e.getMessage());
+            }
+        }
+        
+        // 关闭 Worker Group
+        if (workerGroup != null && !workerGroup.isShutdown()) {
+            workerGroup.shutdownGracefully();
+        }
+        
+        LOG.info("NameNodeServer 资源释放完成");
     }
 
     private void startRegistrationHeartbeatThread() {
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleAtFixedRate(() -> {
+        heartbeatScheduler.scheduleAtFixedRate(() -> {
             try {
                 sendHeartbeatToRegistry();
             } catch (Exception e) {
@@ -145,8 +209,7 @@ public class NameNodeServer {
     }
 
     private void startDiscoveryThread() {
-        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-        scheduler.scheduleAtFixedRate(() -> {
+        discoveryScheduler.scheduleAtFixedRate(() -> {
             try {
                 fetchDataNodesFromRegistry();
             } catch (Exception e) {
