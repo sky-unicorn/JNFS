@@ -52,7 +52,7 @@ public class ExampleApp {
         try {
             switch (choice) {
                 case "1":
-                    runStandardTest();
+                    runStandardTest(scanner);
                     break;
                 case "2":
                     runPoolTest();
@@ -71,7 +71,7 @@ public class ExampleApp {
                     break;
                 default:
                     LOG.info("无效的输入，默认运行标准测试");
-                    runStandardTest();
+                    runStandardTest(scanner);
             }
         } catch (Exception e) {
             LOG.error("ExampleApp异常", e);
@@ -81,44 +81,65 @@ public class ExampleApp {
     }
 
     // --- 1. 标准上传下载测试 ---
-    private static void runStandardTest() {
+    private static void runStandardTest(Scanner scanner) {
         JNFSDriver driver = new JNFSDriver("localhost", 5368);
         try {
-            String filePath = "E:\\back-up\\backup.7z";
-            File file = new File(filePath);
+            while (true) {
+                System.out.println("\n请输入要上传的文件绝对路径 (输入 'exit' 返回主菜单): ");
+                String filePath = scanner.nextLine().trim();
 
-            if (!file.exists()) {
-                LOG.warn("警告: 未找到目标文件 {}", filePath);
-                file = new File("large_test.dat");
-                if (!file.exists()) {
-                    LOG.info("创建测试文件: {}", file.getAbsolutePath());
-                    try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file, "rw")) {
-                        raf.setLength(10 * 1024 * 1024); // 10 MB
+                if ("exit".equalsIgnoreCase(filePath)) {
+                    break;
+                }
+
+                if (filePath.isEmpty()) {
+                    continue;
+                }
+
+                File file = new File(filePath);
+                if (!file.exists() || !file.isFile()) {
+                    System.err.println("错误: 文件不存在或不可读 -> " + filePath);
+                    continue;
+                }
+
+                try {
+                    System.out.println("=== 开始上传文件: " + file.getName() + " ===");
+                    long startUpload = System.currentTimeMillis();
+
+                    String storageId = driver.uploadFile(file);
+
+                    long endUpload = System.currentTimeMillis();
+                    System.out.printf("上传成功! 耗时: %.2f 秒%n", (endUpload - startUpload) / 1000.0);
+                    System.out.println("存储ID (Storage ID): " + storageId);
+
+                    System.out.print("是否立即下载回本地验证? (y/n) [默认n]: ");
+                    String dlChoice = scanner.nextLine().trim();
+
+                    if ("y".equalsIgnoreCase(dlChoice) || "yes".equalsIgnoreCase(dlChoice)) {
+                        System.out.println("\n=== 开始下载文件 ===");
+                        long startDownload = System.currentTimeMillis();
+
+                        // 确保下载目录存在
+                        String downloadPath = "D:\\data\\jnfs\\download\\";
+                        File dlDir = new File(downloadPath);
+                        if (!dlDir.exists()) {
+                            dlDir.mkdirs();
+                        }
+
+                        File downloadedFile = driver.downloadFile(storageId, downloadPath);
+
+                        long endDownload = System.currentTimeMillis();
+                        System.out.printf("下载成功! 耗时: %.2f 秒%n", (endDownload - startDownload) / 1000.0);
+                        System.out.println("文件已保存至: " + downloadedFile.getAbsolutePath());
                     }
+
+                } catch (Exception e) {
+                    LOG.error("文件操作过程中发生错误", e);
                 }
             }
-            System.out.println("=== 开始上传文件: " + file.getName() + " ===");
-            long startUpload = System.currentTimeMillis();
-
-            String storageId = driver.uploadFile(file);
-
-            long endUpload = System.currentTimeMillis();
-            System.out.printf("上传总耗时: %.2f 秒%n", (endUpload - startUpload) / 1000.0);
-            System.out.println("存储编号: " + storageId);
-
-            System.out.println("\n=== 开始下载文件 ===");
-            long startDownload = System.currentTimeMillis();
-
-            File downloadedFile = driver.downloadFile(storageId, "D:\\data\\jnfs\\download\\");
-
-            long endDownload = System.currentTimeMillis();
-            System.out.printf("下载总耗时: %.2f 秒%n", (endDownload - startDownload) / 1000.0);
-            System.out.println("文件保存路径: " + downloadedFile.getAbsolutePath());
-
-        } catch (Exception e) {
-            e.printStackTrace();
         } finally {
             driver.close();
+            System.out.println("已断开与 JNFS 服务器的连接。");
         }
     }
 
