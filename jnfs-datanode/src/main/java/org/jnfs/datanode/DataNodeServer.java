@@ -9,10 +9,18 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.FutureListener;
+import io.netty.channel.pool.AbstractChannelPoolMap;
+import io.netty.channel.pool.ChannelPoolMap;
+import io.netty.channel.pool.ChannelPoolHandler;
+import io.netty.channel.pool.FixedChannelPool;
+import io.netty.channel.pool.SimpleChannelPool;
 import org.jnfs.common.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -31,6 +39,7 @@ import java.util.concurrent.TimeUnit;
  * 负责实际的文件存储
  *
  * 升级：添加后台垃圾回收线程 (GC)
+ * 优化：使用连接池复用 Registry 连接 (方案 B)
  */
 public class DataNodeServer {
 
@@ -42,14 +51,34 @@ public class DataNodeServer {
     // 支持多个注册中心地址
     private final List<InetSocketAddress> registryAddresses;
 
-    // 心跳专用的 EventLoopGroup，避免每次创建销毁
-    private final EventLoopGroup heartbeatGroup = new NioEventLoopGroup(1);
+    // 复用 EventLoopGroup
+    private final EventLoopGroup workerGroup;
+    // 连接池映射
+    private final ChannelPoolMap<InetSocketAddress, SimpleChannelPool> registryPoolMap;
 
     public DataNodeServer(int port, String advertisedHost, List<String> storagePaths, List<InetSocketAddress> registryAddresses) {
         this.port = port;
         this.advertisedHost = advertisedHost;
         this.storagePaths = storagePaths;
         this.registryAddresses = registryAddresses;
+        
+        // 初始化共享的 Worker Group
+        this.workerGroup = new NioEventLoopGroup();
+        
+        // 初始化连接池
+        this.registryPoolMap = new AbstractChannelPoolMap<InetSocketAddress, SimpleChannelPool>() {
+            @Override
+            protected SimpleChannelPool newPool(InetSocketAddress key) {
+                Bootstrap b = new Bootstrap()
+                        .group(workerGroup)
+                        .channel(NioSocketChannel.class)
+                        .option(ChannelOption.TCP_NODELAY, true)
+                        .option(ChannelOption.SO_KEEPALIVE, true);
+                        
+                // 使用 FixedChannelPool 限制最大连接数 (每 Registry 10 连接)
+                return new FixedChannelPool(b.remoteAddress(key), new RegistryChannelPoolHandler(), 10);
+            }
+        };
     }
 
     public void run() throws Exception {
@@ -69,7 +98,16 @@ public class DataNodeServer {
                 businessGroup);
         } finally {
             businessGroup.shutdownGracefully();
-            heartbeatGroup.shutdownGracefully();
+            
+            // 关闭连接池资源
+            if (registryPoolMap instanceof Closeable) {
+                try {
+                    ((Closeable) registryPoolMap).close();
+                } catch (Exception e) {
+                    // ignore
+                }
+            }
+            workerGroup.shutdownGracefully();
         }
     }
 
@@ -130,50 +168,29 @@ public class DataNodeServer {
     private void sendHeartbeatToRegistry() {
         // 向所有配置的 Registry 发送心跳 (广播模式)
         for (InetSocketAddress addr : registryAddresses) {
-            doSendHeartbeatToSingleRegistry(addr);
-        }
-    }
-
-    private void doSendHeartbeatToSingleRegistry(InetSocketAddress registryAddr) {
-        // DataNode 的心跳逻辑目前比较简单，每次都新建连接发送 (短连接)
-        // 或者维护一个 Map<Address, Channel> 实现长连接。这里为了简化修改，使用短连接广播。
-
-        EventLoopGroup group = new NioEventLoopGroup();
-        try {
-            Bootstrap b = new Bootstrap();
-            b.group(group)
-             .channel(NioSocketChannel.class)
-             .option(ChannelOption.SO_KEEPALIVE, true)
-             .handler(new ChannelInitializer<SocketChannel>() {
-                 @Override
-                 protected void initChannel(SocketChannel ch) {
-                     ch.pipeline().addLast(new PacketEncoder());
-                     // 忽略响应
-                     ch.pipeline().addLast(new SimpleChannelInboundHandler<Packet>() {
-                        @Override
-                        protected void channelRead0(ChannelHandlerContext ctx, Packet msg) {}
-                     });
-                 }
-             });
-
-            // 快速超时
-            b.connect(registryAddr).addListener((ChannelFuture future) -> {
-                if (future.isSuccess()) {
-                    Channel ch = future.channel();
-                    doSendHeartbeat(ch);
-                    ch.close();
+            SimpleChannelPool pool = registryPoolMap.get(addr);
+            Future<Channel> future = pool.acquire();
+            
+            future.addListener((FutureListener<Channel>) f -> {
+                if (f.isSuccess()) {
+                    Channel ch = f.getNow();
+                    try {
+                        doSendHeartbeat(ch).addListener(writeFuture -> {
+                            // 写入完成后释放连接
+                            pool.release(ch);
+                        });
+                    } catch (Exception e) {
+                        pool.release(ch);
+                        LOG.error("发送心跳异常 ({}) : {}", addr, e.getMessage());
+                    }
                 } else {
-                    // System.err.println("连接注册中心失败 (" + registryAddr + "): " + future.cause().getMessage());
+                    LOG.warn("连接注册中心失败 ({}) : {}", addr, f.cause().getMessage());
                 }
-                group.shutdownGracefully();
             });
-
-        } catch (Exception e) {
-            group.shutdownGracefully();
         }
     }
 
-    private void doSendHeartbeat(Channel channel) {
+    private ChannelFuture doSendHeartbeat(Channel channel) {
         long totalFreeSpace = 0;
         for (String path : storagePaths) {
             File storeDir = new File(path);
@@ -190,7 +207,7 @@ public class DataNodeServer {
         packet.setToken(Constants.VALID_TOKEN);
         packet.setData(payload.getBytes(StandardCharsets.UTF_8));
 
-        channel.writeAndFlush(packet);
+        return channel.writeAndFlush(packet);
     }
 
     @SuppressWarnings("unchecked")
@@ -222,5 +239,21 @@ public class DataNodeServer {
         LOG.info("对外广播地址: {}", advertisedHost);
 
         new DataNodeServer(port, advertisedHost, storagePaths, registryAddresses).run();
+    }
+    
+    // --- 连接池 Handler ---
+    private static class RegistryChannelPoolHandler implements ChannelPoolHandler {
+        @Override
+        public void channelReleased(Channel ch) throws Exception {}
+
+        @Override
+        public void channelAcquired(Channel ch) throws Exception {}
+
+        @Override
+        public void channelCreated(Channel ch) throws Exception {
+            // 初始化 Pipeline
+            ch.pipeline().addLast(new PacketDecoder());
+            ch.pipeline().addLast(new PacketEncoder());
+        }
     }
 }

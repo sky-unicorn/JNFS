@@ -7,10 +7,18 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
+import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.FutureListener;
+import io.netty.channel.pool.AbstractChannelPoolMap;
+import io.netty.channel.pool.ChannelPoolMap;
+import io.netty.channel.pool.ChannelPoolHandler;
+import io.netty.channel.pool.FixedChannelPool;
+import io.netty.channel.pool.SimpleChannelPool;
 import org.jnfs.common.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -19,12 +27,15 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeoutException;
 
 /**
  * NameNode 服务启动类
  * 负责管理元数据和调度 DataNode
  *
  * 升级：集成注册中心发现机制，并根据配置初始化元数据管理器
+ * 优化：使用连接池复用 Registry 连接 (方案 B)
  */
 public class NameNodeServer {
 
@@ -34,11 +45,34 @@ public class NameNodeServer {
     private final String advertisedHost;
     // 支持多个注册中心地址
     private final List<InetSocketAddress> registryAddresses;
+    
+    // 复用 EventLoopGroup
+    private final EventLoopGroup workerGroup;
+    // 连接池映射
+    private final ChannelPoolMap<InetSocketAddress, SimpleChannelPool> registryPoolMap;
 
     public NameNodeServer(int port, String advertisedHost, List<InetSocketAddress> registryAddresses) {
         this.port = port;
         this.advertisedHost = advertisedHost;
         this.registryAddresses = registryAddresses;
+        
+        // 初始化共享的 Worker Group
+        this.workerGroup = new NioEventLoopGroup();
+        
+        // 初始化连接池
+        this.registryPoolMap = new AbstractChannelPoolMap<InetSocketAddress, SimpleChannelPool>() {
+            @Override
+            protected SimpleChannelPool newPool(InetSocketAddress key) {
+                Bootstrap b = new Bootstrap()
+                        .group(workerGroup)
+                        .channel(NioSocketChannel.class)
+                        .option(ChannelOption.TCP_NODELAY, true)
+                        .option(ChannelOption.SO_KEEPALIVE, true);
+                        
+                // 使用 FixedChannelPool 限制最大连接数 (每 Registry 10 连接)
+                return new FixedChannelPool(b.remoteAddress(key), new RegistryChannelPoolHandler(), 10);
+            }
+        };
     }
 
     public void run() throws Exception {
@@ -54,6 +88,18 @@ public class NameNodeServer {
         
         // 使用 NettyServerUtils 启动服务，传入共享 Handler
         NettyServerUtils.start("NameNode", port, sharedHandler, businessGroup);
+        
+        // 优雅关闭 (虽然主线程会阻塞在 start 方法，但为了完整性)
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            if (registryPoolMap instanceof Closeable) {
+                try {
+                    ((Closeable) registryPoolMap).close();
+                } catch (Exception e) {
+                    // ignore
+                }
+            }
+            workerGroup.shutdownGracefully();
+        }));
     }
 
     private void startRegistrationHeartbeatThread() {
@@ -70,36 +116,31 @@ public class NameNodeServer {
     private void sendHeartbeatToRegistry() {
         // 向所有配置的 Registry 发送心跳 (广播模式，确保所有节点都收到)
         for (InetSocketAddress addr : registryAddresses) {
-            EventLoopGroup group = new NioEventLoopGroup();
-            try {
-                Bootstrap b = new Bootstrap();
-                b.group(group)
-                 .channel(NioSocketChannel.class)
-                 .handler(new ChannelInitializer<SocketChannel>() {
-                     @Override
-                     protected void initChannel(SocketChannel ch) {
-                         ch.pipeline().addLast(new PacketEncoder());
-                     }
-                 });
+            SimpleChannelPool pool = registryPoolMap.get(addr);
+            Future<Channel> future = pool.acquire();
+            
+            future.addListener((FutureListener<Channel>) f -> {
+                if (f.isSuccess()) {
+                    Channel ch = f.getNow();
+                    try {
+                        String payload = advertisedHost + ":" + port;
+                        Packet packet = new Packet();
+                        packet.setCommandType(CommandType.REGISTRY_HEARTBEAT_NAMENODE);
+                        packet.setToken(Constants.VALID_TOKEN);
+                        packet.setData(payload.getBytes(StandardCharsets.UTF_8));
 
-                // 快速连接超时，避免阻塞
-                ChannelFuture f = b.connect(addr).sync();
-                Channel channel = f.channel();
-
-                String payload = advertisedHost + ":" + port;
-
-                Packet packet = new Packet();
-                packet.setCommandType(CommandType.REGISTRY_HEARTBEAT_NAMENODE);
-                packet.setToken(Constants.VALID_TOKEN);
-                packet.setData(payload.getBytes(StandardCharsets.UTF_8));
-
-                channel.writeAndFlush(packet).sync();
-                channel.close().sync();
-            } catch (Exception e) {
-                // System.err.println("注册/心跳失败 (" + addr + "): " + e.getMessage());
-            } finally {
-                group.shutdownGracefully();
-            }
+                        // 写入并刷新，完成后释放连接
+                        ch.writeAndFlush(packet).addListener(writeFuture -> {
+                            pool.release(ch);
+                        });
+                    } catch (Exception e) {
+                        pool.release(ch);
+                        LOG.error("发送心跳异常 ({}) : {}", addr, e.getMessage());
+                    }
+                } else {
+                    LOG.warn("连接注册中心失败 ({}) : {}", addr, f.cause().getMessage());
+                }
+            });
         }
     }
 
@@ -117,37 +158,54 @@ public class NameNodeServer {
     private void fetchDataNodesFromRegistry() {
         // 尝试从任一 Registry 获取 DataNode 列表 (Failover 模式)
         for (InetSocketAddress addr : registryAddresses) {
-            EventLoopGroup group = new NioEventLoopGroup();
+            SimpleChannelPool pool = registryPoolMap.get(addr);
+            Channel ch = null;
+            String handlerName = "discovery_" + System.nanoTime();
             try {
-                Bootstrap b = new Bootstrap();
-                DiscoveryHandler handler = new DiscoveryHandler();
-                b.group(group)
-                 .channel(NioSocketChannel.class)
-                 .handler(new ChannelInitializer<SocketChannel>() {
-                     @Override
-                     protected void initChannel(SocketChannel ch) {
-                         ch.pipeline().addLast(new PacketDecoder());
-                         ch.pipeline().addLast(new PacketEncoder());
-                         ch.pipeline().addLast(handler);
-                     }
-                 });
+                // 同步获取连接 (带有超时)
+                Future<Channel> future = pool.acquire();
+                if (future.await(3000, TimeUnit.MILLISECONDS)) {
+                    if (future.isSuccess()) {
+                        ch = future.getNow();
+                    }
+                } else {
+                    // 超时取消，避免连接泄漏
+                    future.cancel(true);
+                }
+                
+                if (ch == null) {
+                    continue; // 尝试下一个
+                }
 
-                ChannelFuture f = b.connect(addr).sync();
-                Channel channel = f.channel();
-
+                CompletableFuture<Boolean> promise = new CompletableFuture<>();
+                DiscoveryHandler handler = new DiscoveryHandler(promise);
+                
+                // 动态添加 Handler
+                ch.pipeline().addLast(handlerName, handler);
+                
                 Packet request = new Packet();
                 request.setCommandType(CommandType.REGISTRY_GET_DATANODES);
                 request.setToken(Constants.VALID_TOKEN);
-                channel.writeAndFlush(request);
-
-                f.channel().closeFuture().sync();
-
-                // 如果成功获取数据，直接返回，不再尝试下一个
-                return;
+                ch.writeAndFlush(request);
+                
+                // 等待结果
+                try {
+                    promise.get(5, TimeUnit.SECONDS);
+                    // 成功获取，退出循环
+                    return;
+                } catch (TimeoutException e) {
+                    LOG.warn("获取 DataNode 列表超时 ({})", addr);
+                }
             } catch (Exception e) {
-                // System.err.println("连接注册中心失败 (" + addr + "): " + e.getMessage());
+                // LOG.warn("获取 DataNode 列表失败 ({}) : {}", addr, e.getMessage());
             } finally {
-                group.shutdownGracefully();
+                if (ch != null) {
+                    // 清理 Handler
+                    if (ch.pipeline().get(handlerName) != null) {
+                        ch.pipeline().remove(handlerName);
+                    }
+                    pool.release(ch);
+                }
             }
         }
     }
@@ -182,7 +240,6 @@ public class NameNodeServer {
             if (metaConfig.containsKey("cache")) {
                 Map<String, Object> cacheConfig = (Map<String, Object>) metaConfig.get("cache");
                 cacheEnabled = (boolean) cacheConfig.getOrDefault("enabled", true);
-                // 处理 Integer 到 Long 的转换 (snakeyaml 可能返回 Integer)
                 Object maxSizeObj = cacheConfig.getOrDefault("max-size", 100000);
                 if (maxSizeObj instanceof Integer) {
                     cacheMaxSize = ((Integer) maxSizeObj).longValue();
@@ -219,8 +276,31 @@ public class NameNodeServer {
         new NameNodeServer(port, advertisedHost, registryAddresses).run();
     }
 
+    // --- 连接池 Handler ---
+    private static class RegistryChannelPoolHandler implements ChannelPoolHandler {
+        @Override
+        public void channelReleased(Channel ch) throws Exception {}
+
+        @Override
+        public void channelAcquired(Channel ch) throws Exception {}
+
+        @Override
+        public void channelCreated(Channel ch) throws Exception {
+            // 初始化 Pipeline
+            ch.pipeline().addLast(new PacketDecoder());
+            ch.pipeline().addLast(new PacketEncoder());
+        }
+    }
+
     // --- 内部 Discovery Handler ---
     private static class DiscoveryHandler extends SimpleChannelInboundHandler<Packet> {
+        
+        private final CompletableFuture<Boolean> promise;
+        
+        public DiscoveryHandler(CompletableFuture<Boolean> promise) {
+            this.promise = promise;
+        }
+
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, Packet packet) {
             if (packet.getCommandType() == CommandType.REGISTRY_RESPONSE_DATANODES) {
@@ -233,12 +313,16 @@ public class NameNodeServer {
                     LOG.info("当前无活跃 DataNode");
                     NameNodeHandler.initDataNodes(null);
                 }
+                // 通知完成
+                promise.complete(true);
             }
-            ctx.close();
+            // 注意：这里不再 ctx.close()，因为连接要复用
         }
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+            promise.completeExceptionally(cause);
+            // 发生异常时可以关闭连接，Pool 会检测到
             ctx.close();
         }
     }
