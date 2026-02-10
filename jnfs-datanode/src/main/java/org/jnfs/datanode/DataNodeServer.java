@@ -156,11 +156,27 @@ public class DataNodeServer {
         }
 
         // 关闭连接池资源
-        if (registryPoolMap instanceof Closeable) {
-            try {
-                ((Closeable) registryPoolMap).close();
-            } catch (Exception e) {
-                LOG.warn("关闭连接池失败: {}", e.getMessage());
+        // ChannelPoolMap (AbstractChannelPoolMap) 实现了 Iterable 接口
+        if (registryPoolMap instanceof Iterable) {
+            for (Object poolObj : (Iterable<?>) registryPoolMap) {
+                if (poolObj instanceof SimpleChannelPool) {
+                    try {
+                        ((SimpleChannelPool) poolObj).close();
+                    } catch (Exception e) {
+                         LOG.warn("关闭连接池异常: {}", e.getMessage());
+                    }
+                } else if (poolObj instanceof Map.Entry) {
+                     // AbstractChannelPoolMap 的 iterator 返回的是 Map.Entry? 
+                     // 查看源码: AbstractChannelPoolMap 实现了 Iterable<Map.Entry<K, P>>
+                     Object value = ((Map.Entry<?, ?>) poolObj).getValue();
+                     if (value instanceof SimpleChannelPool) {
+                         try {
+                             ((SimpleChannelPool) value).close();
+                         } catch (Exception e) {
+                             LOG.warn("关闭连接池异常: {}", e.getMessage());
+                         }
+                     }
+                }
             }
         }
 
