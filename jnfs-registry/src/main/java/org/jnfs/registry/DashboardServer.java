@@ -49,12 +49,16 @@ public class DashboardServer {
         StringBuilder sb = new StringBuilder();
         sb.append("[");
         int i = 0;
+        long now = System.currentTimeMillis();
         for (Map.Entry<String, RegistryHandler.NodeInfo> entry : nodes.entrySet()) {
             if (i > 0) sb.append(",");
             sb.append("{");
             sb.append("\"address\":\"").append(entry.getKey()).append("\",");
             sb.append("\"freeSpace\":").append(entry.getValue().freeSpace).append(",");
-            sb.append("\"lastHeartbeat\":").append(entry.getValue().lastHeartbeatTime);
+            sb.append("\"lastHeartbeat\":").append(entry.getValue().lastHeartbeatTime).append(",");
+            // 服务端计算状态，避免客户端时间不一致导致误判
+            boolean isOnline = (now - entry.getValue().lastHeartbeatTime) < RegistryHandler.heartbeatTimeout;
+            sb.append("\"status\":\"").append(isOnline ? "online" : "offline").append("\"");
             sb.append("}");
             i++;
         }
@@ -235,8 +239,8 @@ public class DashboardServer {
                     "                    }\n" +
                     "\n" +
                     "                    data.forEach(node => {\n" +
-                    "                        const diff = now - node.lastHeartbeat;\n" +
-                    "                        const isOnline = diff < 30000;\n" +
+                    "                        // 使用服务端返回的状态，避免客户端时间不一致问题\n" +
+                    "                        const isOnline = node.status === 'online';\n" +
                     "                        \n" +
                     "                        if (isOnline) {\n" +
                     "                            activeCount++;\n" +
