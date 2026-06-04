@@ -22,6 +22,7 @@ import org.jnfs.common.CommandType;
 import org.jnfs.common.ConfigUtil;
 import org.jnfs.common.Constants;
 import org.jnfs.common.NettyServerUtils;
+import org.jnfs.common.SecurityConfig;
 import org.jnfs.common.Packet;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
@@ -291,7 +292,7 @@ public class DataNodeServer {
 
         Packet packet = new Packet();
         packet.setCommandType(CommandType.REGISTRY_HEARTBEAT);
-        packet.setToken(Constants.VALID_TOKEN);
+        packet.setToken(Constants.getValidToken());
         packet.setData(payload.getBytes(StandardCharsets.UTF_8));
 
         return channel.writeAndFlush(packet);
@@ -300,6 +301,9 @@ public class DataNodeServer {
     @SuppressWarnings("unchecked")
     public static void main(String[] args) throws Exception {
         Map<String, Object> config = ConfigUtil.loadConfig("datanode.yml");
+
+        // 初始化安全配置
+        SecurityConfig.init("datanode.yml");
 
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 5369);

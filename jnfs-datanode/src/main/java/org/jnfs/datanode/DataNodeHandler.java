@@ -5,6 +5,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.DefaultFileRegion;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
+import org.jnfs.common.Constants;
 import org.jnfs.common.Packet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,8 +27,6 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
     private static final Logger LOG = LoggerFactory.getLogger(DataNodeHandler.class);
 
-    // 预设的安全令牌 (与 NameNode 保持一致)
-    private static final String VALID_TOKEN = "jnfs-secure-token-2025";
     // 临时文件后缀
     public static final String TMP_SUFFIX = ".tmp";
 
@@ -61,7 +60,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
     private void handlePacket(ChannelHandlerContext ctx, Packet packet) {
         // 验证 Token (仅针对控制指令)
-        if (!VALID_TOKEN.equals(packet.getToken())) {
+        if (!Constants.getValidToken().equals(packet.getToken())) {
             LOG.warn("安全拦截: 无效的 Token");
             sendResponse(ctx, CommandType.ERROR, "Authentication Failed".getBytes(StandardCharsets.UTF_8));
             ctx.close();

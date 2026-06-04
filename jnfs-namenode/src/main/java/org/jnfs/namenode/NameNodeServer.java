@@ -14,12 +14,13 @@ import java.util.concurrent.TimeoutException;
 
 import org.jnfs.common.CommandType;
 import org.jnfs.common.ConfigUtil;
-import org.jnfs.common.Constants;
 import org.jnfs.common.NetUtils;
 import org.jnfs.common.NettyServerUtils;
 import org.jnfs.common.Packet;
 import org.jnfs.common.PacketDecoder;
+import org.jnfs.common.Constants;
 import org.jnfs.common.PacketEncoder;
+import org.jnfs.common.SecurityConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -216,7 +217,7 @@ public class NameNodeServer {
                         String payload = advertisedHost + ":" + port;
                         Packet packet = new Packet();
                         packet.setCommandType(CommandType.REGISTRY_HEARTBEAT_NAMENODE);
-                        packet.setToken(Constants.VALID_TOKEN);
+                        packet.setToken(Constants.getValidToken());
                         packet.setData(payload.getBytes(StandardCharsets.UTF_8));
 
                         // 写入并刷新，完成后释放连接
@@ -274,7 +275,7 @@ public class NameNodeServer {
                 
                 Packet request = new Packet();
                 request.setCommandType(CommandType.REGISTRY_GET_DATANODES);
-                request.setToken(Constants.VALID_TOKEN);
+                request.setToken(Constants.getValidToken());
                 ch.writeAndFlush(request);
                 
                 // 等待结果
@@ -303,6 +304,9 @@ public class NameNodeServer {
     public static void main(String[] args) throws Exception {
         Map<String, Object> config = ConfigUtil.loadConfig("namenode.yml");
 
+        // 初始化安全配置
+        SecurityConfig.init("namenode.yml");
+
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 5368);
         // 如果没有配置 advertised_host，则自动获取本机 IP
@@ -313,6 +317,8 @@ public class NameNodeServer {
 
         LOG.info("使用注册中心集群: {}", registryAddresses);
         LOG.info("对外广播地址: {}", advertisedHost);
+
+        // 加载安全配置
 
         // --- 初始化 MetadataManager ---
         MetadataManager metadataManager = null;

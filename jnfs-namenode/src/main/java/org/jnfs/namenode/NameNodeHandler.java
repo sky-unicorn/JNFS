@@ -6,6 +6,7 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
+import org.jnfs.common.Constants;
 import org.jnfs.common.Packet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,8 +26,6 @@ import java.util.concurrent.ConcurrentHashMap;
 public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     private static final Logger LOG = LoggerFactory.getLogger(NameNodeHandler.class);
-
-    private static final String VALID_TOKEN = "jnfs-secure-token-2025";
 
     // 移除旧的静态全量 Map
     // private static final Map<String, String> filenameToHash = new ConcurrentHashMap<>();
@@ -157,7 +156,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     }
 
     private boolean validateToken(String token) {
-        return VALID_TOKEN.equals(token);
+        return Constants.getValidToken().equals(token);
     }
 
     private void handleCheckExistence(ChannelHandlerContext ctx, Packet packet) {

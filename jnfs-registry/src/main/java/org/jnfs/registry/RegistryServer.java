@@ -38,6 +38,9 @@ public class RegistryServer {
     public static void main(String[] args) throws Exception {
         Map<String, Object> config = ConfigUtil.loadConfig("registry.yml");
 
+        // 初始化安全配置
+        org.jnfs.common.SecurityConfig.init("registry.yml");
+
         // 读取服务器端口配置
         Map<String, Object> serverConfig = (Map<String, Object>) config.getOrDefault("server", Map.of());
         int port = (int) serverConfig.getOrDefault("port", 5367);
@@ -54,7 +57,7 @@ public class RegistryServer {
         RegistryHandler.heartbeatTimeout = heartbeatTimeout;
 
         LOG.info("启动注册中心 -> RPC Port: {}, Dashboard Port: {}, Heartbeat Timeout: {}ms", port, dashboardPort, heartbeatTimeout);
-        
+
         new RegistryServer(port, dashboardPort).run();
     }
 }

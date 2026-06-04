@@ -1,5 +1,6 @@
 package org.jnfs.registry;
 
+import org.jnfs.common.SecurityConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,6 +37,16 @@ public class DashboardServer {
                 }
             });
 
+            server.createContext("/api/security", exchange -> {
+                String json = getSecurityJson();
+                byte[] response = json.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
+                exchange.sendResponseHeaders(200, response.length);
+                try (java.io.OutputStream os = exchange.getResponseBody()) {
+                    os.write(response);
+                }
+            });
+
             server.setExecutor(null);
             server.start();
             LOG.info("JNFS Dashboard 启动成功，访问地址: http://localhost:{}", port);
@@ -64,6 +75,12 @@ public class DashboardServer {
         }
         sb.append("]");
         return sb.toString();
+    }
+
+    private String getSecurityJson() {
+        String currentToken = SecurityConfig.getToken();
+        boolean customConfigured = !SecurityConfig.DEFAULT_TOKEN.equals(currentToken);
+        return "{\"securityConfigured\":" + customConfigured + "}";
     }
 
     static class DashboardHttpHandler implements com.sun.net.httpserver.HttpHandler {
@@ -191,6 +208,10 @@ public class DashboardServer {
                     "                <h3>全网剩余容量</h3>\n" +
                     "                <div class=\"value\" id=\"totalFreeSpace\">-</div>\n" +
                     "            </div>\n" +
+                    "            <div class=\"card\">\n" +
+                    "                <h3>安全状态</h3>\n" +
+                    "                <div class=\"value\" id=\"securityStatus\"><span style='color:#e67e22'>加载中...</span></div>\n" +
+                    "            </div>\n" +
                     "        </div>\n" +
                     "\n" +
                     "        <div class=\"table-container\">\n" +
@@ -264,6 +285,18 @@ public class DashboardServer {
                     "                    // 更新统计卡片\n" +
                     "                    document.getElementById('activeNodes').innerText = activeCount;\n" +
                     "                    document.getElementById('totalFreeSpace').innerText = formatBytes(totalSpace);\n" +
+                    "                })\n" +
+                    "\n" +
+                    "            // 加载安全状态\n" +
+                    "            fetch('/api/security')\n" +
+                    "                .then(res => res.json())\n" +
+                    "                .then(data => {\n" +
+                    "                    const el = document.getElementById('securityStatus');\n" +
+                    "                    if (data.securityConfigured) {\n" +
+                    "                        el.innerHTML = '<span style=\\'color:#2e7d32\\'>已配置 (自定义令牌)</span>';\n" +
+                    "                    } else {\n" +
+                    "                        el.innerHTML = '<span style=\\'color:#e67e22\\'>⚠ 使用默认令牌</span>';\n" +
+                    "                    }\n" +
                     "                })\n" +
                     "                .catch(err => {\n" +
                     "                    console.error('Fetch error:', err);\n" +

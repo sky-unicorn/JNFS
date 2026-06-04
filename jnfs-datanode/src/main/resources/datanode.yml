@@ -22,3 +22,10 @@ registry:
 
   # 方式 2: 集群配置 (推荐)
   addresses: localhost:5367
+
+# --- 安全配置 ---
+security:
+  # 通信令牌 (服务间鉴权密钥，所有节点必须一致)
+  token: "jnfs-secure-token-2025"
+  # AES 加密密钥 (必须为 16/24/32 字节，对应 128/192/256 位密钥)
+  aes-key: "jnfs-aes-key-256bit-secure-key!!"

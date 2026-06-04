@@ -7,6 +7,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import org.jnfs.common.CommandType;
+import org.jnfs.common.SecurityConfig;
 import org.jnfs.common.Packet;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
@@ -34,7 +35,7 @@ public class ExampleApp {
 
     private static final Logger LOG = LoggerFactory.getLogger(ExampleApp.class);
 
-    private static final String CLIENT_TOKEN = "jnfs-secure-token-2025";
+    private static final String TOKEN = SecurityConfig.getToken();
 
     public static void main(String[] args) {
         LOG.info("=== JNFS 综合测试工具 ===");
@@ -216,7 +217,7 @@ public class ExampleApp {
 
             Packet packet = new Packet();
             packet.setCommandType(CommandType.UPLOAD_REQUEST);
-            packet.setToken(CLIENT_TOKEN);
+            packet.setToken(TOKEN);
             packet.setData(nameBytes);
             packet.setStreamLength(10); // file size
 
@@ -253,7 +254,7 @@ public class ExampleApp {
 
             Packet packet = new Packet();
             packet.setCommandType(CommandType.UPLOAD_REQUEST);
-            packet.setToken(CLIENT_TOKEN);
+            packet.setToken(TOKEN);
             packet.setData(nameBytes);
             packet.setStreamLength(1024 * 1024);
 
@@ -324,7 +325,7 @@ public class ExampleApp {
                     ChannelFuture f = b.connect("localhost", 5368).sync();
                     Packet packet = new Packet();
                     packet.setCommandType(CommandType.NAMENODE_PRE_UPLOAD);
-                    packet.setToken(CLIENT_TOKEN);
+                    packet.setToken(TOKEN);
                     packet.setData(hash.getBytes(StandardCharsets.UTF_8));
                     f.channel().writeAndFlush(packet);
                 } catch (Exception e) {

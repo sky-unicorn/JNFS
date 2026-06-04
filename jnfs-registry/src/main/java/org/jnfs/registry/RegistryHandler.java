@@ -4,6 +4,7 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
+import org.jnfs.common.Constants;
 import org.jnfs.common.Packet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,8 +29,6 @@ import java.util.concurrent.TimeUnit;
 public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
     private static final Logger LOG = LoggerFactory.getLogger(RegistryHandler.class);
-
-    private static final String VALID_TOKEN = "jnfs-secure-token-2025";
 
     // 节点信息内部类
     public static class NodeInfo {
@@ -95,7 +94,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exception {
-        if (!VALID_TOKEN.equals(packet.getToken())) {
+        if (!Constants.getValidToken().equals(packet.getToken())) {
             LOG.warn("Registry 安全拦截: 无效的 Token - {}", ctx.channel().remoteAddress());
             sendResponse(ctx, CommandType.ERROR, "Authentication Failed".getBytes(StandardCharsets.UTF_8));
             ctx.close();

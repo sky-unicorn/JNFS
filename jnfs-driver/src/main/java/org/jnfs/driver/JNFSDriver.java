@@ -36,7 +36,8 @@ public class JNFSDriver {
     // 改为实例变量，以便根据配置决定是否输出日志
     private final Logger LOG;
 
-    private static final String CLIENT_TOKEN = "jnfs-secure-token-2025";
+    // 加密工具实例
+    private final SecurityUtil securityUtil;
 
     // Registry 地址列表 (用于集群/高可用)
     private final List<InetSocketAddress> registryAddresses = new CopyOnWriteArrayList<>();
@@ -96,6 +97,8 @@ public class JNFSDriver {
     }
 
     private JNFSDriver(String nameNodeHost, int nameNodePort, String registryAddrStr, boolean enableLog) {
+        this.securityUtil = new SecurityUtil(SecurityConfig.getAesKey());
+
         // 初始化 Logger：如果启用日志则使用标准 LoggerFactory，否则使用 NOPLogger (不输出任何日志)
         if (enableLog) {
             this.LOG = LoggerFactory.getLogger(JNFSDriver.class);
@@ -177,7 +180,7 @@ public class JNFSDriver {
 
                 Packet request = new Packet();
                 request.setCommandType(CommandType.REGISTRY_GET_NAMENODES);
-                request.setToken(CLIENT_TOKEN);
+                request.setToken(SecurityConfig.getToken());
                 channel.writeAndFlush(request);
 
                 f.channel().closeFuture().sync();
@@ -295,7 +298,7 @@ public class JNFSDriver {
         // --- 加密环节 ---
         LOG.info("[Driver] 正在对文件进行本地加密...");
         File encryptedFile = new File(file.getParent(), file.getName() + ".enc");
-        SecurityUtil.encryptFile(file, encryptedFile);
+        securityUtil.encryptFile(file, encryptedFile);
         LOG.info("[Driver] 加密完成，准备上传密文");
 
         try {
@@ -467,7 +470,7 @@ public class JNFSDriver {
 
             Packet packet = new Packet();
             packet.setCommandType(CommandType.UPLOAD_REQUEST);
-            packet.setToken(CLIENT_TOKEN);
+            packet.setToken(SecurityConfig.getToken());
             packet.setData(hashBytes);
             packet.setStreamLength(fileSize);
 
@@ -491,7 +494,7 @@ public class JNFSDriver {
     private void downloadFromDataNode(String host, int port, String hash, File targetFile) throws Exception {
         Bootstrap b = new Bootstrap();
         // 使用 PacketDecoder 复用协议解析逻辑
-        DownloadHandler handler = new DownloadHandler(targetFile, LOG);
+        DownloadHandler handler = new DownloadHandler(targetFile, securityUtil, LOG);
         b.group(group)
          .channel(NioSocketChannel.class)
          .handler(new ChannelInitializer<SocketChannel>() {
@@ -508,7 +511,7 @@ public class JNFSDriver {
 
         Packet request = new Packet();
         request.setCommandType(CommandType.DOWNLOAD_REQUEST);
-        request.setToken(CLIENT_TOKEN);
+        request.setToken(SecurityConfig.getToken());
         request.setData(hash.getBytes(StandardCharsets.UTF_8));
         channel.writeAndFlush(request);
 
@@ -567,7 +570,7 @@ public class JNFSDriver {
 
             Packet packet = new Packet();
             packet.setCommandType(type);
-            packet.setToken(CLIENT_TOKEN);
+            packet.setToken(SecurityConfig.getToken());
             packet.setData(data);
 
             channel.writeAndFlush(packet);
@@ -645,14 +648,16 @@ public class JNFSDriver {
 
     private static class DownloadHandler extends SimpleChannelInboundHandler<Object> {
         private final File targetFile;
+        private final SecurityUtil securityUtil;
         private OutputStream out;
         private long fileSize = -1;
         private long receivedBytes = 0;
         private final BlockingQueue<Boolean> completionSignal = new LinkedBlockingQueue<>();
         private final Logger logger;
 
-        public DownloadHandler(File targetFile, Logger logger) {
+        public DownloadHandler(File targetFile, SecurityUtil securityUtil, Logger logger) {
             this.targetFile = targetFile;
+            this.securityUtil = securityUtil;
             this.logger = logger;
         }
 
@@ -683,7 +688,7 @@ public class JNFSDriver {
                     targetFile.delete();
                 }
                 // 使用 SecurityUtil 创建流式解密输出流
-                this.out = SecurityUtil.createDecryptOutputStream(new FileOutputStream(targetFile));
+                this.out = securityUtil.createDecryptOutputStream(new FileOutputStream(targetFile));
                 logger.info("[Driver] 开始接收文件流，大小: {}", fileSize);
 
             } else if (msg instanceof ByteBuf) {
