@@ -6,6 +6,8 @@ import io.netty.channel.socket.SocketChannel;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
 
+import java.io.IOException;
+
 /**
  * Netty ChannelPool 处理器
  * 负责连接的创建、配置和释放清理
@@ -14,13 +16,17 @@ public class NameNodeChannelPoolHandler implements ChannelPoolHandler {
 
     @Override
     public void channelReleased(Channel ch) throws Exception {
-        // 连接释放回池时，可以在这里做一些清理工作，比如 flush 缓冲区
-        // 但对于长连接，通常不需要关闭
+        // 连接释放回池时，flush 缓冲区确保数据发送完毕
+        ch.flush();
     }
 
     @Override
     public void channelAcquired(Channel ch) throws Exception {
-        // 连接被取出时调用
+        // 连接被取出时，检查连接是否仍然活跃
+        // 如果连接已断开，抛出异常让连接池创建新连接
+        if (!ch.isActive()) {
+            throw new IOException("连接已断开，需要重新创建");
+        }
     }
 
     @Override

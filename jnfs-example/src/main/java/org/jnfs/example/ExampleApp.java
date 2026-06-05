@@ -11,6 +11,7 @@ import org.jnfs.common.SecurityConfig;
 import org.jnfs.common.Packet;
 import org.jnfs.common.PacketDecoder;
 import org.jnfs.common.PacketEncoder;
+import org.jnfs.driver.ConnectionStatus;
 import org.jnfs.driver.JNFSDriver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -85,6 +86,16 @@ public class ExampleApp {
     private static void runStandardTest(Scanner scanner) {
         JNFSDriver driver = new JNFSDriver("localhost", 5368);
         try {
+            // Verify connection before entering interactive loop
+            System.out.println("=== Verifying connection to NameNode ===");
+            ConnectionStatus status = driver.initialize();
+            printConnectionStatus(status);
+
+            if (!status.isOk()) {
+                System.err.println("Connection failed. Please check if NameNode is running.");
+                return;
+            }
+
             while (true) {
                 System.out.println("\n请输入要上传的文件绝对路径 (输入 'exit' 返回主菜单): ");
                 String filePath = scanner.nextLine().trim();
@@ -388,5 +399,37 @@ public class ExampleApp {
 
         if (targetFile.exists()) targetFile.delete();
         dir.delete();
+    }
+
+    // --- Connection Helpers ---
+
+    /**
+     * Print connection status in a formatted way.
+     */
+    private static void printConnectionStatus(ConnectionStatus status) {
+        String symbol;
+        switch (status.getState()) {
+            case SUCCESS:
+                symbol = "[OK]";
+                break;
+            case PARTIAL_SUCCESS:
+                symbol = "[PARTIAL]";
+                break;
+            default:
+                symbol = "[FAIL]";
+                break;
+        }
+        System.out.printf("%s Connection State: %s - %s%n",
+                symbol, status.getState().name(), status.getMessage());
+
+        if (!status.getReachableRegistries().isEmpty()) {
+            System.out.println("    Reachable Registries: " + status.getReachableRegistries());
+        }
+        if (!status.getUnreachableRegistries().isEmpty()) {
+            System.out.println("    Unreachable Registries: " + status.getUnreachableRegistries());
+        }
+        if (!status.getDiscoveredNameNodes().isEmpty()) {
+            System.out.println("    Discovered NameNodes: " + status.getDiscoveredNameNodes());
+        }
     }
 }

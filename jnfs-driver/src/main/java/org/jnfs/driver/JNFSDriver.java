@@ -21,9 +21,12 @@ import org.slf4j.helpers.NOPLogger;
 import java.io.*;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 /**
  * JNFS Driver (SDK)
@@ -52,6 +55,14 @@ public class JNFSDriver {
 
     // 连接池映射: Address -> Pool
     private final ChannelPoolMap<InetSocketAddress, SimpleChannelPool> poolMap;
+
+    // 最后一次连接状态
+    private volatile ConnectionStatus lastStatus = new ConnectionStatus(
+            ConnectionState.SUCCESS, "尚未初始化",
+            null, null, null);
+
+    // 是否已启动后台刷新线程
+    private final AtomicBoolean refreshThreadStarted = new AtomicBoolean(false);
 
     /**
      * 直连模式构造函数 (默认开启日志)
@@ -131,7 +142,8 @@ public class JNFSDriver {
                         .group(group)
                         .channel(NioSocketChannel.class)
                         .option(ChannelOption.TCP_NODELAY, true)
-                        .option(ChannelOption.SO_KEEPALIVE, true);
+                        .option(ChannelOption.SO_KEEPALIVE, true)
+                        .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000);
 
                 // 使用 FixedChannelPool 限制最大连接数，防止资源耗尽
                 return new FixedChannelPool(b.remoteAddress(key), new NameNodeChannelPoolHandler(), 10);
@@ -139,24 +151,75 @@ public class JNFSDriver {
         };
 
         if (useRegistry) {
-            refreshNameNodes();
-            startNameNodeRefreshThread();
+            initialize();
         } else {
             // 直连模式，直接添加单一节点
             nameNodes.add(new InetSocketAddress(nameNodeHost, nameNodePort));
+            lastStatus = new ConnectionStatus(ConnectionState.SUCCESS, "直连模式",
+                    null, null, List.of(new InetSocketAddress(nameNodeHost, nameNodePort)));
         }
     }
 
     private void startNameNodeRefreshThread() {
+        if (!refreshThreadStarted.compareAndSet(false, true)) {
+            return; // 已启动，不重复启动
+        }
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "Driver-Refresh");
             t.setDaemon(true);
             return t;
         });
-        this.scheduler.scheduleAtFixedRate(this::refreshNameNodes, 10, 10, TimeUnit.SECONDS);
+        this.scheduler.scheduleAtFixedRate(() -> {
+            ConnectionStatus status = refreshNameNodes();
+            lastStatus = status;
+        }, 10, 10, TimeUnit.SECONDS);
     }
 
-    private void refreshNameNodes() {
+    /**
+     * 同步初始化连接
+     * 刷新 NameNode 列表，启动后台刷新线程，并返回连接状态
+     *
+     * @return 连接状态
+     */
+    public ConnectionStatus initialize() {
+        ConnectionStatus status = refreshNameNodes();
+        lastStatus = status;
+        if (useRegistry) {
+            startNameNodeRefreshThread();
+        }
+        return status;
+    }
+
+    /**
+     * 异步初始化连接
+     * 在独立线程中执行 initialize()，完成后回调
+     *
+     * @param callback 初始化完成后的回调，参数为连接状态
+     */
+    public void initialize(Consumer<ConnectionStatus> callback) {
+        CompletableFuture.runAsync(() -> {
+            ConnectionStatus status = initialize();
+            if (callback != null) {
+                callback.accept(status);
+            }
+        });
+    }
+
+    /**
+     * 获取最后一次的连接状态
+     * 如果从未调用过 initialize()，返回默认值 (SUCCESS，消息提示未初始化)
+     *
+     * @return 最后一次的连接状态
+     */
+    public ConnectionStatus getConnectionStatus() {
+        return lastStatus;
+    }
+
+    private ConnectionStatus refreshNameNodes() {
+        List<InetSocketAddress> reachableRegistries = new ArrayList<>();
+        List<InetSocketAddress> unreachableRegistries = new ArrayList<>();
+        List<InetSocketAddress> discoveredNameNodes = new ArrayList<>();
+
         // 遍历所有注册中心地址，直到成功获取列表 (Failover)
         for (InetSocketAddress registryAddr : registryAddresses) {
             Bootstrap b = new Bootstrap();
@@ -164,6 +227,7 @@ public class JNFSDriver {
 
             b.group(group)
              .channel(NioSocketChannel.class)
+             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
              .handler(new ChannelInitializer<SocketChannel>() {
                  @Override
                  protected void initChannel(SocketChannel ch) {
@@ -174,8 +238,15 @@ public class JNFSDriver {
              });
 
             try {
-                // 连接当前 Registry
-                ChannelFuture f = b.connect(registryAddr).sync();
+                // 连接当前 Registry，设置连接超时
+                ChannelFuture f = b.connect(registryAddr);
+                boolean connected = f.awaitUninterruptibly(5000, TimeUnit.MILLISECONDS);
+                if (!connected || !f.isSuccess()) {
+                    String reason = f.cause() != null ? f.cause().getMessage() : "连接超时";
+                    LOG.warn("[Driver] 连接 Registry ({}) 失败: {}，尝试下一个...", registryAddr, reason);
+                    unreachableRegistries.add(registryAddr);
+                    continue;
+                }
                 Channel channel = f.channel();
 
                 Packet request = new Packet();
@@ -183,29 +254,72 @@ public class JNFSDriver {
                 request.setToken(SecurityConfig.getToken());
                 channel.writeAndFlush(request);
 
-                f.channel().closeFuture().sync();
+                // 等待响应，设置超时防止永久阻塞
+                channel.closeFuture().await(10, TimeUnit.SECONDS);
+
+                String error = handler.getError();
+                if (error != null) {
+                    LOG.warn("[Driver] Registry ({}) 返回错误: {}，尝试下一个...", registryAddr, error);
+                    // 检查是否是 Token 错误
+                    if (error.contains("Token") || error.contains("token") || error.contains("认证")) {
+                        LOG.error("[Driver] 认证 Token 无效");
+                        return new ConnectionStatus(ConnectionState.TOKEN_INVALID,
+                                "认证 Token 无效: " + error,
+                                reachableRegistries, unreachableRegistries, discoveredNameNodes);
+                    }
+                    unreachableRegistries.add(registryAddr);
+                    continue;
+                }
+
+                reachableRegistries.add(registryAddr);
 
                 List<String> nodes = handler.getNodes();
                 if (nodes != null) {
-                    // 即使列表为空也可能是正常的(刚启动)，但只要通信成功就算成功
                     if (!nodes.isEmpty()) {
-                        nameNodes.clear();
+                        // 先构建完整的新列表，再用 clear()+addAll() 替换
+                        // 相比原来逐个 add() 极大缩短了并发读取窗口
+                        // sendRequestToNameNode 已有空列表 fallback 逻辑可覆盖间隙
+                        List<InetSocketAddress> newNodes = new ArrayList<>();
                         for (String node : nodes) {
                             String[] parts = node.split(":");
                             if (parts.length == 2) {
-                                nameNodes.add(new InetSocketAddress(parts[0], Integer.parseInt(parts[1])));
+                                InetSocketAddress addr = new InetSocketAddress(parts[0], Integer.parseInt(parts[1]));
+                                newNodes.add(addr);
+                                discoveredNameNodes.add(addr);
                             }
                         }
+                        nameNodes.clear();
+                        nameNodes.addAll(newNodes);
+                        LOG.info("[Driver] 从 Registry ({}) 刷新 NameNode 列表: {}", registryAddr, nameNodes);
+                        // 判断状态：是否所有 Registry 都可达
+                        if (unreachableRegistries.isEmpty()) {
+                            return new ConnectionStatus(ConnectionState.SUCCESS,
+                                    "所有 Registry 可达",
+                                    reachableRegistries, unreachableRegistries, discoveredNameNodes);
+                        } else {
+                            return new ConnectionStatus(ConnectionState.PARTIAL_SUCCESS,
+                                    "部分 Registry 不可达",
+                                    reachableRegistries, unreachableRegistries, discoveredNameNodes);
+                        }
+                    } else {
+                        // Registry 可达但未返回任何 NameNode
+                        LOG.warn("[Driver] Registry ({}) 可达但未发现 NameNode", registryAddr);
+                        return new ConnectionStatus(ConnectionState.NO_NAMENODE,
+                                "Registry 可达但未发现 NameNode: " + registryAddr,
+                                reachableRegistries, unreachableRegistries, discoveredNameNodes);
                     }
-                    LOG.info("[Driver] 从 Registry ({}) 刷新 NameNode 列表: {}", registryAddr, nameNodes);
-                    // 成功后跳出循环，不再尝试其他 Registry
-                    return;
                 }
             } catch (Exception e) {
-                LOG.warn("[Driver] 连接 Registry ({}) 失败，尝试下一个...", registryAddr);
+                LOG.warn("[Driver] 连接 Registry ({}) 失败: {}，尝试下一个...", registryAddr, e.getMessage());
+                unreachableRegistries.add(registryAddr);
             }
         }
+
+        // 所有 Registry 都不可达
         LOG.error("[Driver] 无法连接任何 Registry，刷新 NameNode 失败");
+        return new ConnectionStatus(ConnectionState.REGISTRY_UNREACHABLE,
+                "所有 Registry 不可达",
+                reachableRegistries, unreachableRegistries, discoveredNameNodes);
     }
 
     public void close() {
@@ -451,6 +565,7 @@ public class JNFSDriver {
         SyncHandler handler = new SyncHandler(LOG);
         b.group(group)
          .channel(NioSocketChannel.class)
+         .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
          .handler(new ChannelInitializer<SocketChannel>() {
              @Override
              protected void initChannel(SocketChannel ch) {
@@ -460,7 +575,12 @@ public class JNFSDriver {
              }
          });
 
-        ChannelFuture f = b.connect(host, port).sync();
+        ChannelFuture f = b.connect(host, port);
+        boolean connected = f.awaitUninterruptibly(6000, TimeUnit.MILLISECONDS);
+        if (!connected || !f.isSuccess()) {
+            throw new IOException("连接 DataNode 失败 (" + host + ":" + port + "): " +
+                (f.cause() != null ? f.cause().getMessage() : "超时"));
+        }
         Channel channel = f.channel();
 
         try {
@@ -497,6 +617,7 @@ public class JNFSDriver {
         DownloadHandler handler = new DownloadHandler(targetFile, securityUtil, LOG);
         b.group(group)
          .channel(NioSocketChannel.class)
+         .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
          .handler(new ChannelInitializer<SocketChannel>() {
              @Override
              protected void initChannel(SocketChannel ch) {
@@ -506,7 +627,12 @@ public class JNFSDriver {
              }
          });
 
-        ChannelFuture f = b.connect(host, port).sync();
+        ChannelFuture f = b.connect(host, port);
+        boolean connected = f.awaitUninterruptibly(6000, TimeUnit.MILLISECONDS);
+        if (!connected || !f.isSuccess()) {
+            throw new IOException("连接 DataNode 失败 (" + host + ":" + port + "): " +
+                (f.cause() != null ? f.cause().getMessage() : "超时"));
+        }
         Channel channel = f.channel();
 
         Packet request = new Packet();
@@ -522,7 +648,10 @@ public class JNFSDriver {
     // --- 使用连接池发送请求 ---
     private Packet sendRequestToNameNode(CommandType type, byte[] data) throws Exception {
         if (nameNodes.isEmpty()) {
-            if (useRegistry) refreshNameNodes();
+            if (useRegistry) {
+                ConnectionStatus status = refreshNameNodes();
+                lastStatus = status;
+            }
             if (nameNodes.isEmpty()) throw new IOException("无可用 NameNode");
         }
 
@@ -533,7 +662,9 @@ public class JNFSDriver {
         // 简单的负载均衡 + 故障转移
         while (attempts < maxAttempts) {
             int index = nextNameNodeIndex.getAndIncrement();
-            InetSocketAddress address = nameNodes.get(Math.abs(index % nameNodes.size()));
+            // 注意：Math.abs(Integer.MIN_VALUE) 仍为负数，需用位运算确保非负
+            int safeIndex = (index & 0x7FFFFFFF) % nameNodes.size();
+            InetSocketAddress address = nameNodes.get(safeIndex);
 
             try {
                 return doSendRequest(address, type, data);
@@ -550,12 +681,22 @@ public class JNFSDriver {
         SimpleChannelPool pool = poolMap.get(address);
 
         Future<Channel> future = pool.acquire();
-        // 设置连接超时，防止卡死
-        if (!future.await(3000)) {
-             throw new IOException("获取连接超时");
-        }
-        if (!future.isSuccess()) {
-            throw new IOException("无法连接 NameNode", future.cause());
+        // 等待连接获取完成，超时时间略大于 CONNECT_TIMEOUT_MILLIS (5s) + 余量
+        boolean acquired = future.await(6000);
+        // 先检查是否已明确失败 (如连接被拒绝)，提供更精确的错误信息
+        if (!acquired || !future.isSuccess()) {
+            Throwable cause = future.cause();
+            String msg;
+            if (cause instanceof java.net.ConnectException) {
+                msg = "连接被拒绝 (" + address + ")，NameNode 服务未启动";
+            } else if (cause instanceof java.net.NoRouteToHostException) {
+                msg = "无法到达 NameNode (" + address + ")，请检查网络或防火墙配置";
+            } else if (!acquired) {
+                msg = "连接 NameNode 超时 (" + address + ")，服务可能未启动";
+            } else {
+                msg = "无法连接 NameNode (" + address + ")";
+            }
+            throw new IOException(msg, cause);
         }
 
         Channel channel = future.getNow();
@@ -594,6 +735,7 @@ public class JNFSDriver {
     private static class SyncHandler extends SimpleChannelInboundHandler<Packet> {
         private final BlockingQueue<Packet> queue = new LinkedBlockingQueue<>();
         private final Logger logger;
+        private volatile boolean channelClosed = false;
 
         public SyncHandler(Logger logger) {
             this.logger = logger;
@@ -604,10 +746,25 @@ public class JNFSDriver {
             queue.offer(msg);
         }
 
-        public Packet getResponse(long timeout, TimeUnit unit) throws InterruptedException {
+        @Override
+        public void channelInactive(ChannelHandlerContext ctx) {
+            channelClosed = true;
+            // 如果队列中还没有响应，放入一个特殊的错误包以唤醒等待线程
+            if (queue.isEmpty()) {
+                Packet errorPacket = new Packet();
+                errorPacket.setCommandType(CommandType.ERROR);
+                errorPacket.setData("连接已断开".getBytes(StandardCharsets.UTF_8));
+                queue.offer(errorPacket);
+            }
+        }
+
+        public Packet getResponse(long timeout, TimeUnit unit) throws IOException, InterruptedException {
             Packet p = queue.poll(timeout, unit);
             if (p == null) {
-                throw new RuntimeException("等待响应超时");
+                if (channelClosed) {
+                    throw new IOException("连接已断开，服务可能未启动");
+                }
+                throw new IOException("等待响应超时 (" + timeout + " " + unit.toString().toLowerCase() + ")");
             }
             return p;
         }
@@ -615,16 +772,26 @@ public class JNFSDriver {
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             logger.error("ConnectionHandler异常", cause);
+            channelClosed = true;
+            if (queue.isEmpty()) {
+                Packet errorPacket = new Packet();
+                errorPacket.setCommandType(CommandType.ERROR);
+                errorPacket.setData(("连接异常: " + cause.getMessage()).getBytes(StandardCharsets.UTF_8));
+                queue.offer(errorPacket);
+            }
             ctx.close();
         }
     }
 
     private static class RegistryDiscoveryHandler extends SimpleChannelInboundHandler<Packet> {
         private final List<String> nodes = new CopyOnWriteArrayList<>();
+        private volatile String error;
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, Packet packet) {
-            if (packet.getCommandType() == CommandType.REGISTRY_RESPONSE_NAMENODES) {
+            if (packet.getCommandType() == CommandType.ERROR) {
+                this.error = new String(packet.getData(), StandardCharsets.UTF_8);
+            } else if (packet.getCommandType() == CommandType.REGISTRY_RESPONSE_NAMENODES) {
                 String content = new String(packet.getData(), StandardCharsets.UTF_8);
                 if (!content.isEmpty()) {
                     String[] parts = content.split(",");
@@ -638,6 +805,10 @@ public class JNFSDriver {
 
         public List<String> getNodes() {
             return nodes;
+        }
+
+        public String getError() {
+            return error;
         }
 
         @Override
@@ -721,10 +892,10 @@ public class JNFSDriver {
              }
         }
 
-        public void waitForCompletion() throws InterruptedException {
+        public void waitForCompletion() throws IOException, InterruptedException {
             Boolean result = completionSignal.poll(30, TimeUnit.MINUTES);
             if (result == null || !result) {
-                throw new RuntimeException("下载超时或失败");
+                throw new IOException("下载超时或失败");
             }
         }
 

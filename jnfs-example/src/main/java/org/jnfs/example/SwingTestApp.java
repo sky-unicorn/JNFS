@@ -1,5 +1,7 @@
 package org.jnfs.example;
 
+import org.jnfs.driver.ConnectionState;
+import org.jnfs.driver.ConnectionStatus;
 import org.jnfs.driver.JNFSDriver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,12 +20,27 @@ public class SwingTestApp extends JFrame {
 
     private static final Logger LOG = LoggerFactory.getLogger(SwingTestApp.class);
 
+    private static final Color COLOR_CONNECTED = new Color(34, 139, 34);    // green
+    private static final Color COLOR_PARTIAL = new Color(218, 165, 32);    // goldenrod / yellow
+    private static final Color COLOR_DISCONNECTED = new Color(200, 0, 0);  // red
+    private static final Color COLOR_UNKNOWN = Color.GRAY;
+
     private JTextArea logArea;
     private JTextField uploadPathField;
     private JTextField downloadPathField;
     private JTextField storageIdField;
     private JTextField hostField;
     private JTextField portField;
+
+    // Connection status UI
+    private JLabel statusIndicator;
+    private JLabel statusText;
+    private JButton connectBtn;
+    private JTextArea connectionDetailArea;
+
+    // Persistent driver instance
+    private JNFSDriver driver;
+    private ConnectionStatus currentConnectionStatus = null;
 
     public SwingTestApp() {
         setTitle("JNFS Swing Test Client");
@@ -33,9 +50,13 @@ public class SwingTestApp extends JFrame {
 
         initComponents();
         redirectSystemStreams();
+        updateConnectionStatus((ConnectionStatus) null, "Not connected");
     }
 
     private void initComponents() {
+        // Connection Status Bar (top)
+        JPanel statusBar = createStatusBar();
+
         // Main Panel for Upload/Download
         JPanel mainPanel = createMainPanel();
         mainPanel.setBorder(BorderFactory.createTitledBorder("Standard Operations"));
@@ -47,11 +68,44 @@ public class SwingTestApp extends JFrame {
         JScrollPane scrollPane = new JScrollPane(logArea);
         scrollPane.setBorder(BorderFactory.createTitledBorder("Logs"));
 
-        // Main Layout
-        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, mainPanel, scrollPane);
-        splitPane.setDividerLocation(250);
-        
+        // Main Layout: status bar on top, then split pane (operations / logs)
+        JPanel topWrapper = new JPanel(new BorderLayout());
+        topWrapper.add(statusBar, BorderLayout.NORTH);
+        topWrapper.add(mainPanel, BorderLayout.CENTER);
+
+        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, topWrapper, scrollPane);
+        splitPane.setDividerLocation(300);
+
         add(splitPane);
+    }
+
+    private JPanel createStatusBar() {
+        JPanel bar = new JPanel(new BorderLayout(8, 4));
+        bar.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0, Color.LIGHT_GRAY),
+                BorderFactory.createEmptyBorder(6, 10, 6, 10)
+        ));
+
+        // Left: colored dot + status text
+        JPanel leftPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        statusIndicator = new JLabel(" \u25CF "); // Unicode filled circle
+        statusIndicator.setFont(new Font("Dialog", Font.BOLD, 16));
+        statusIndicator.setForeground(COLOR_UNKNOWN);
+
+        statusText = new JLabel("Not connected");
+        statusText.setFont(new Font("Dialog", Font.BOLD, 13));
+
+        leftPanel.add(statusIndicator);
+        leftPanel.add(statusText);
+
+        // Right: detail button
+        JButton detailBtn = new JButton("Details...");
+        detailBtn.addActionListener(e -> showConnectionDetails());
+
+        bar.add(leftPanel, BorderLayout.WEST);
+        bar.add(detailBtn, BorderLayout.EAST);
+
+        return bar;
     }
 
     private JPanel createMainPanel() {
@@ -60,7 +114,7 @@ public class SwingTestApp extends JFrame {
         gbc.insets = new Insets(8, 8, 8, 8);
         gbc.fill = GridBagConstraints.HORIZONTAL;
 
-        // Host/Port Configuration
+        // Host/Port + Connect Button
         gbc.gridx = 0; gbc.gridy = 0;
         panel.add(new JLabel("Host:"), gbc);
         gbc.gridx = 1;
@@ -73,8 +127,13 @@ public class SwingTestApp extends JFrame {
         portField = new JTextField("5368", 5);
         panel.add(portField, gbc);
 
+        gbc.gridx = 4;
+        connectBtn = new JButton("Connect");
+        connectBtn.addActionListener(e -> runTask(this::doConnect));
+        panel.add(connectBtn, gbc);
+
         // Upload Section
-        gbc.gridx = 0; gbc.gridy = 1;
+        gbc.gridx = 0; gbc.gridy = 1; gbc.gridwidth = 1;
         panel.add(new JLabel("Upload File:"), gbc);
         gbc.gridx = 1; gbc.gridwidth = 2;
         uploadPathField = new JTextField(20);
@@ -114,6 +173,113 @@ public class SwingTestApp extends JFrame {
 
         return panel;
     }
+
+    // --- Connection Status Management ---
+
+    private void updateConnectionStatus(ConnectionStatus status, String message) {
+        this.currentConnectionStatus = status;
+        SwingUtilities.invokeLater(() -> {
+            if (status == null) {
+                statusIndicator.setForeground(COLOR_UNKNOWN);
+                statusText.setText(message);
+            } else {
+                ConnectionState state = status.getState();
+                switch (state) {
+                    case SUCCESS:
+                        statusIndicator.setForeground(COLOR_CONNECTED);
+                        statusText.setText("Connected: " + message);
+                        break;
+                    case PARTIAL_SUCCESS:
+                        statusIndicator.setForeground(COLOR_PARTIAL);
+                        statusText.setText("Partial: " + message);
+                        break;
+                    default:
+                        // REGISTRY_UNREACHABLE, NO_NAMENODE, TOKEN_INVALID, TIMEOUT
+                        statusIndicator.setForeground(COLOR_DISCONNECTED);
+                        statusText.setText("Disconnected: " + message);
+                        break;
+                }
+            }
+        });
+    }
+
+    private void showConnectionDetails() {
+        if (connectionDetailArea == null) {
+            connectionDetailArea = new JTextArea(10, 40);
+            connectionDetailArea.setEditable(false);
+            connectionDetailArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("=== Connection Details ===\n");
+        if (currentConnectionStatus == null) {
+            sb.append("Status: Not connected\n");
+            sb.append("Please click [Connect] to establish connection.\n");
+        } else {
+            sb.append("State: ").append(currentConnectionStatus.getState().name())
+              .append(" - ").append(currentConnectionStatus.getMessage()).append("\n");
+            sb.append("Reachable Registries: ").append(currentConnectionStatus.getReachableRegistries()).append("\n");
+            sb.append("Unreachable Registries: ").append(currentConnectionStatus.getUnreachableRegistries()).append("\n");
+            sb.append("Discovered NameNodes: ").append(currentConnectionStatus.getDiscoveredNameNodes()).append("\n");
+            if (driver != null) {
+                sb.append("Host: ").append(hostField.getText()).append("\n");
+                sb.append("Port: ").append(portField.getText()).append("\n");
+            }
+        }
+
+        connectionDetailArea.setText(sb.toString());
+        JOptionPane.showMessageDialog(this, new JScrollPane(connectionDetailArea),
+                "Connection Details", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    // --- Connection Logic ---
+
+    private void doConnect() {
+        String host = hostField.getText().trim();
+        int port;
+        try {
+            port = Integer.parseInt(portField.getText().trim());
+        } catch (NumberFormatException e) {
+            System.err.println("Invalid port number.");
+            return;
+        }
+
+        // Close previous driver if exists
+        if (driver != null) {
+            driver.close();
+            driver = null;
+        }
+
+        System.out.println("=== Connecting to " + host + ":" + port + " ===");
+        updateConnectionStatus((ConnectionStatus) null, "Connecting...");
+
+        try {
+            driver = new JNFSDriver(host, port);
+            ConnectionStatus status = driver.initialize();
+            updateConnectionStatus(status, status.getMessage());
+
+            System.out.println("Connection result: " + status.getState().name() + " - " + status.getMessage());
+        } catch (Exception e) {
+            LOG.error("Connection failed", e);
+            updateConnectionStatus(new ConnectionStatus(
+                    ConnectionState.REGISTRY_UNREACHABLE, "Connection failed",
+                    null, null, null), "Connection failed");
+            if (driver != null) {
+                driver.close();
+                driver = null;
+            }
+        }
+    }
+
+    private boolean ensureConnected() {
+        if (driver == null || currentConnectionStatus == null || !currentConnectionStatus.isOk()) {
+            System.err.println("Not connected. Please click [Connect] first.");
+            return false;
+        }
+        return true;
+    }
+
+    // --- Utility ---
 
     private void chooseFile(JTextField targetField, boolean directoryOnly) {
         JFileChooser chooser = new JFileChooser();
@@ -164,8 +330,8 @@ public class SwingTestApp extends JFrame {
     // --- Business Logic ---
 
     private void doUpload() {
-        String host = hostField.getText();
-        int port = Integer.parseInt(portField.getText());
+        if (!ensureConnected()) return;
+
         String filePath = uploadPathField.getText().trim();
 
         if (filePath.isEmpty()) {
@@ -179,7 +345,6 @@ public class SwingTestApp extends JFrame {
             return;
         }
 
-        JNFSDriver driver = new JNFSDriver(host, port);
         try {
             System.out.println("=== Starting Upload: " + file.getName() + " ===");
             long start = System.currentTimeMillis();
@@ -191,14 +356,12 @@ public class SwingTestApp extends JFrame {
             SwingUtilities.invokeLater(() -> storageIdField.setText(storageId));
         } catch (Exception e) {
             LOG.error("Upload failed", e);
-        } finally {
-            driver.close();
         }
     }
 
     private void doDownload() {
-        String host = hostField.getText();
-        int port = Integer.parseInt(portField.getText());
+        if (!ensureConnected()) return;
+
         String storageId = storageIdField.getText().trim();
         String downloadDir = downloadPathField.getText().trim();
 
@@ -212,7 +375,6 @@ public class SwingTestApp extends JFrame {
             dlDir.mkdirs();
         }
 
-        JNFSDriver driver = new JNFSDriver(host, port);
         try {
             System.out.println("=== Starting Download ===");
             long start = System.currentTimeMillis();
@@ -223,9 +385,15 @@ public class SwingTestApp extends JFrame {
             System.out.println("Saved to: " + downloadedFile.getAbsolutePath());
         } catch (Exception e) {
             LOG.error("Download failed", e);
-        } finally {
+        }
+    }
+
+    @Override
+    public void dispose() {
+        if (driver != null) {
             driver.close();
         }
+        super.dispose();
     }
 
     public static void main(String[] args) {
