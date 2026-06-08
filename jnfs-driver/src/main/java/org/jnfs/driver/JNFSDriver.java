@@ -6,9 +6,7 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.pool.AbstractChannelPoolMap;
 import io.netty.channel.pool.ChannelPoolMap;
-import io.netty.channel.pool.FixedChannelPool;
 import io.netty.channel.pool.SimpleChannelPool;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
@@ -134,21 +132,8 @@ public class JNFSDriver {
 
         this.group = new NioEventLoopGroup();
 
-        // 初始化连接池
-        this.poolMap = new AbstractChannelPoolMap<InetSocketAddress, SimpleChannelPool>() {
-            @Override
-            protected SimpleChannelPool newPool(InetSocketAddress key) {
-                Bootstrap b = new Bootstrap()
-                        .group(group)
-                        .channel(NioSocketChannel.class)
-                        .option(ChannelOption.TCP_NODELAY, true)
-                        .option(ChannelOption.SO_KEEPALIVE, true)
-                        .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000);
-
-                // 使用 FixedChannelPool 限制最大连接数，防止资源耗尽
-                return new FixedChannelPool(b.remoteAddress(key), new NameNodeChannelPoolHandler(), 10);
-            }
-        };
+        // 初始化连接池 (使用通用工具类)
+        this.poolMap = ChannelPoolUtils.createDefaultPoolMap(group);
 
         if (useRegistry) {
             initialize();
@@ -164,11 +149,9 @@ public class JNFSDriver {
         if (!refreshThreadStarted.compareAndSet(false, true)) {
             return; // 已启动，不重复启动
         }
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "Driver-Refresh");
-            t.setDaemon(true);
-            return t;
-        });
+        // 使用统一的 Daemon 线程工厂
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(
+                new DaemonThreadFactory("Driver-Refresh"));
         this.scheduler.scheduleAtFixedRate(() -> {
             ConnectionStatus status = refreshNameNodes();
             lastStatus = status;
@@ -182,11 +165,13 @@ public class JNFSDriver {
      * @return 连接状态
      */
     public ConnectionStatus initialize() {
+        if (!useRegistry) {
+            // 直连模式：构造函数中已初始化 nameNodes 和 lastStatus，无需刷新
+            return lastStatus;
+        }
         ConnectionStatus status = refreshNameNodes();
         lastStatus = status;
-        if (useRegistry) {
-            startNameNodeRefreshThread();
-        }
+        startNameNodeRefreshThread();
         return status;
     }
 
@@ -222,20 +207,10 @@ public class JNFSDriver {
 
         // 遍历所有注册中心地址，直到成功获取列表 (Failover)
         for (InetSocketAddress registryAddr : registryAddresses) {
-            Bootstrap b = new Bootstrap();
             RegistryDiscoveryHandler handler = new RegistryDiscoveryHandler();
 
-            b.group(group)
-             .channel(NioSocketChannel.class)
-             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
-             .handler(new ChannelInitializer<SocketChannel>() {
-                 @Override
-                 protected void initChannel(SocketChannel ch) {
-                     ch.pipeline().addLast(new PacketDecoder());
-                     ch.pipeline().addLast(new PacketEncoder());
-                     ch.pipeline().addLast(handler);
-                 }
-             });
+            // 使用通用工具类创建 Bootstrap
+            Bootstrap b = NettyClientBootstrap.createWithHandler(group, 5000, handler);
 
             try {
                 // 连接当前 Registry，设置连接超时
@@ -561,27 +536,11 @@ public class JNFSDriver {
     }
 
     private void uploadToDataNode(String host, int port, File file, String hash) throws Exception {
-        Bootstrap b = new Bootstrap();
         SyncHandler handler = new SyncHandler(LOG);
-        b.group(group)
-         .channel(NioSocketChannel.class)
-         .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
-         .handler(new ChannelInitializer<SocketChannel>() {
-             @Override
-             protected void initChannel(SocketChannel ch) {
-                 ch.pipeline().addLast(new PacketDecoder());
-                 ch.pipeline().addLast(new PacketEncoder());
-                 ch.pipeline().addLast(handler);
-             }
-         });
+        // 使用通用工具类创建 Bootstrap
+        Bootstrap b = NettyClientBootstrap.createWithHandler(group, 5000, handler);
 
-        ChannelFuture f = b.connect(host, port);
-        boolean connected = f.awaitUninterruptibly(6000, TimeUnit.MILLISECONDS);
-        if (!connected || !f.isSuccess()) {
-            throw new IOException("连接 DataNode 失败 (" + host + ":" + port + "): " +
-                (f.cause() != null ? f.cause().getMessage() : "超时"));
-        }
-        Channel channel = f.channel();
+        Channel channel = NettyClientBootstrap.connectSync(b, host, port, 6000);
 
         try {
             long fileSize = file.length();
@@ -612,28 +571,12 @@ public class JNFSDriver {
     }
 
     private void downloadFromDataNode(String host, int port, String hash, File targetFile) throws Exception {
-        Bootstrap b = new Bootstrap();
         // 使用 PacketDecoder 复用协议解析逻辑
         DownloadHandler handler = new DownloadHandler(targetFile, securityUtil, LOG);
-        b.group(group)
-         .channel(NioSocketChannel.class)
-         .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
-         .handler(new ChannelInitializer<SocketChannel>() {
-             @Override
-             protected void initChannel(SocketChannel ch) {
-                 ch.pipeline().addLast(new PacketDecoder()); // 复用标准 Decoder
-                 ch.pipeline().addLast(new PacketEncoder());
-                 ch.pipeline().addLast(handler);
-             }
-         });
+        // 使用通用工具类创建 Bootstrap
+        Bootstrap b = NettyClientBootstrap.createWithHandler(group, 5000, handler);
 
-        ChannelFuture f = b.connect(host, port);
-        boolean connected = f.awaitUninterruptibly(6000, TimeUnit.MILLISECONDS);
-        if (!connected || !f.isSuccess()) {
-            throw new IOException("连接 DataNode 失败 (" + host + ":" + port + "): " +
-                (f.cause() != null ? f.cause().getMessage() : "超时"));
-        }
-        Channel channel = f.channel();
+        Channel channel = NettyClientBootstrap.connectSync(b, host, port, 6000);
 
         Packet request = new Packet();
         request.setCommandType(CommandType.DOWNLOAD_REQUEST);

@@ -6,37 +6,31 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.jnfs.common.ChannelPoolUtils;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.ConfigUtil;
+import org.jnfs.common.Constants;
+import org.jnfs.common.DaemonThreadFactory;
 import org.jnfs.common.NetUtils;
 import org.jnfs.common.NettyServerUtils;
 import org.jnfs.common.Packet;
-import org.jnfs.common.PacketDecoder;
-import org.jnfs.common.Constants;
-import org.jnfs.common.PacketEncoder;
+import org.jnfs.common.ServerShutdownHelper;
 import org.jnfs.common.SecurityConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.pool.AbstractChannelPoolMap;
-import io.netty.channel.pool.ChannelPoolHandler;
 import io.netty.channel.pool.ChannelPoolMap;
-import io.netty.channel.pool.FixedChannelPool;
 import io.netty.channel.pool.SimpleChannelPool;
-import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
 import io.netty.util.concurrent.Future;
@@ -57,7 +51,7 @@ public class NameNodeServer {
     private final String advertisedHost;
     // 支持多个注册中心地址
     private final List<InetSocketAddress> registryAddresses;
-    
+
     // 复用 EventLoopGroup
     private final EventLoopGroup workerGroup;
     // 连接池映射
@@ -71,47 +65,22 @@ public class NameNodeServer {
         this.port = port;
         this.advertisedHost = advertisedHost;
         this.registryAddresses = registryAddresses;
-        
+
         // 初始化共享的 Worker Group
         this.workerGroup = new NioEventLoopGroup();
-        
-        // 初始化连接池
-        this.registryPoolMap = new AbstractChannelPoolMap<InetSocketAddress, SimpleChannelPool>() {
-            @Override
-            protected SimpleChannelPool newPool(InetSocketAddress key) {
-                Bootstrap b = new Bootstrap()
-                        .group(workerGroup)
-                        .channel(NioSocketChannel.class)
-                        .option(ChannelOption.TCP_NODELAY, true)
-                        .option(ChannelOption.SO_KEEPALIVE, true);
-                        
-                // 使用 FixedChannelPool 限制最大连接数 (每 Registry 10 连接)
-                return new FixedChannelPool(b.remoteAddress(key), new RegistryChannelPoolHandler(), 10);
-            }
-        };
 
-        // 初始化调度器 (Daemon 线程)
-        this.heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-            @Override
-            public Thread newThread(Runnable r) {
-                Thread t = new Thread(r, "NameNode-Heartbeat");
-                t.setDaemon(true);
-                return t;
-            }
-        });
+        // 初始化连接池 (使用通用工具类)
+        this.registryPoolMap = ChannelPoolUtils.createDefaultPoolMap(workerGroup);
 
-        this.discoveryScheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-            @Override
-            public Thread newThread(Runnable r) {
-                Thread t = new Thread(r, "NameNode-Discovery");
-                t.setDaemon(true);
-                return t;
-            }
-        });
+        // 初始化调度器 (使用统一的 Daemon 线程工厂)
+        this.heartbeatScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                new DaemonThreadFactory("NameNode-Heartbeat"));
+        this.discoveryScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                new DaemonThreadFactory("NameNode-Discovery"));
     }
 
     // 运行标志
-    private volatile boolean running = true;
+    private final AtomicBoolean running = new AtomicBoolean(true);
 
     public void run() throws Exception {
         // 启动后台线程定期从注册中心拉取 DataNode 列表
@@ -121,15 +90,15 @@ public class NameNodeServer {
 
         // 共享的 Handler 实例
         NameNodeHandler sharedHandler = new NameNodeHandler();
-        
+
         EventExecutorGroup businessGroup = new DefaultEventExecutorGroup(16);
-        
+
         // 注册 Shutdown Hook (必须在 start 阻塞前注册)
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             LOG.info("Shutdown hook triggered...");
             shutdown();
         }));
-        
+
         try {
             // 使用 NettyServerUtils 启动服务，传入共享 Handler
             // 这会阻塞直到 Channel 关闭
@@ -141,57 +110,14 @@ public class NameNodeServer {
             businessGroup.shutdownGracefully();
         }
     }
-    
+
     /**
      * 统一的资源释放方法，支持幂等调用
      */
     private void shutdown() {
-        if (!running) {
-            return;
-        }
-        running = false;
-        
-        LOG.info("正在停止 NameNodeServer 资源...");
-
-        // 关闭调度器
-        if (heartbeatScheduler != null && !heartbeatScheduler.isShutdown()) {
-            heartbeatScheduler.shutdownNow();
-        }
-        if (discoveryScheduler != null && !discoveryScheduler.isShutdown()) {
-            discoveryScheduler.shutdownNow();
-        }
-
-        // 关闭连接池
-        // ChannelPoolMap (AbstractChannelPoolMap) 实现了 Iterable 接口
-        if (registryPoolMap instanceof Iterable) {
-            for (Object poolObj : (Iterable<?>) registryPoolMap) {
-                if (poolObj instanceof SimpleChannelPool) {
-                    try {
-                        ((SimpleChannelPool) poolObj).close();
-                    } catch (Exception e) {
-                         LOG.warn("关闭连接池异常: {}", e.getMessage());
-                    }
-                } else if (poolObj instanceof Map.Entry) {
-                     // AbstractChannelPoolMap 的 iterator 返回的是 Map.Entry? 
-                     // 查看源码: AbstractChannelPoolMap 实现了 Iterable<Map.Entry<K, P>>
-                     Object value = ((Map.Entry<?, ?>) poolObj).getValue();
-                     if (value instanceof SimpleChannelPool) {
-                         try {
-                             ((SimpleChannelPool) value).close();
-                         } catch (Exception e) {
-                             LOG.warn("关闭连接池异常: {}", e.getMessage());
-                         }
-                     }
-                }
-            }
-        }
-        
-        // 关闭 Worker Group
-        if (workerGroup != null && !workerGroup.isShutdown()) {
-            workerGroup.shutdownGracefully();
-        }
-        
-        LOG.info("NameNodeServer 资源释放完成");
+        ServerShutdownHelper.shutdownAll(LOG, "NameNodeServer", running,
+                new ScheduledExecutorService[]{heartbeatScheduler, discoveryScheduler},
+                registryPoolMap, workerGroup);
     }
 
     private void startRegistrationHeartbeatThread() {
@@ -209,7 +135,7 @@ public class NameNodeServer {
         for (InetSocketAddress addr : registryAddresses) {
             SimpleChannelPool pool = registryPoolMap.get(addr);
             Future<Channel> future = pool.acquire();
-            
+
             future.addListener((FutureListener<Channel>) f -> {
                 if (f.isSuccess()) {
                     Channel ch = f.getNow();
@@ -262,22 +188,22 @@ public class NameNodeServer {
                     // 超时取消，避免连接泄漏
                     future.cancel(true);
                 }
-                
+
                 if (ch == null) {
                     continue; // 尝试下一个
                 }
 
                 CompletableFuture<Boolean> promise = new CompletableFuture<>();
                 DiscoveryHandler handler = new DiscoveryHandler(promise);
-                
+
                 // 动态添加 Handler
                 ch.pipeline().addLast(handlerName, handler);
-                
+
                 Packet request = new Packet();
                 request.setCommandType(CommandType.REGISTRY_GET_DATANODES);
                 request.setToken(Constants.getValidToken());
                 ch.writeAndFlush(request);
-                
+
                 // 等待结果
                 try {
                     promise.get(5, TimeUnit.SECONDS);
@@ -309,7 +235,7 @@ public class NameNodeServer {
 
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 5368);
-        // 如果没有配置 advertised_host，则自动获取本机 IP
+        // 如果没有配置 advertised_host，则自动获取本机 IP (统一使用项目自带的 NetUtils)
         String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtils.getLocalIp());
 
         // 读取注册中心配置 (支持逗号分隔的多个地址)
@@ -322,7 +248,7 @@ public class NameNodeServer {
 
         // --- 初始化 MetadataManager ---
         MetadataManager metadataManager = null;
-        
+
         // 缓存配置默认值
         boolean cacheEnabled = true;
         long cacheMaxSize = 100000L;
@@ -371,27 +297,11 @@ public class NameNodeServer {
         new NameNodeServer(port, advertisedHost, registryAddresses).run();
     }
 
-    // --- 连接池 Handler ---
-    private static class RegistryChannelPoolHandler implements ChannelPoolHandler {
-        @Override
-        public void channelReleased(Channel ch) throws Exception {}
-
-        @Override
-        public void channelAcquired(Channel ch) throws Exception {}
-
-        @Override
-        public void channelCreated(Channel ch) throws Exception {
-            // 初始化 Pipeline
-            ch.pipeline().addLast(new PacketDecoder());
-            ch.pipeline().addLast(new PacketEncoder());
-        }
-    }
-
     // --- 内部 Discovery Handler ---
     private static class DiscoveryHandler extends SimpleChannelInboundHandler<Packet> {
-        
+
         private final CompletableFuture<Boolean> promise;
-        
+
         public DiscoveryHandler(CompletableFuture<Boolean> promise) {
             this.promise = promise;
         }

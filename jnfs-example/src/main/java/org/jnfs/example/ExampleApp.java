@@ -4,13 +4,11 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import org.jnfs.common.CommandType;
+import org.jnfs.common.NettyClientBootstrap;
 import org.jnfs.common.SecurityConfig;
 import org.jnfs.common.Packet;
-import org.jnfs.common.PacketDecoder;
-import org.jnfs.common.PacketEncoder;
 import org.jnfs.driver.ConnectionStatus;
 import org.jnfs.driver.JNFSDriver;
 import org.slf4j.Logger;
@@ -198,27 +196,18 @@ public class ExampleApp {
     private static void runSecurityTest() throws Exception {
         EventLoopGroup group = new NioEventLoopGroup();
         try {
-            Bootstrap b = new Bootstrap();
-            b.group(group)
-             .channel(NioSocketChannel.class)
-             .handler(new ChannelInitializer<SocketChannel>() {
-                 @Override
-                 protected void initChannel(SocketChannel ch) {
-                     ch.pipeline().addLast(new PacketDecoder());
-                     ch.pipeline().addLast(new PacketEncoder());
-                     ch.pipeline().addLast(new SimpleChannelInboundHandler<Packet>() {
-                         @Override
-                         protected void channelRead0(ChannelHandlerContext ctx, Packet msg) {
-                             if (msg.getCommandType() == CommandType.ERROR) {
-                                 System.out.println("收到预期错误响应: " + new String(msg.getData()));
-                             } else {
-                                 System.out.println("收到非预期响应: " + msg.getCommandType());
-                             }
-                             ctx.close();
-                         }
-                     });
-                 }
-             });
+            Bootstrap b = NettyClientBootstrap.createWithHandler(group,
+                    new SimpleChannelInboundHandler<Packet>() {
+                        @Override
+                        protected void channelRead0(ChannelHandlerContext ctx, Packet msg) {
+                            if (msg.getCommandType() == CommandType.ERROR) {
+                                System.out.println("收到预期错误响应: " + new String(msg.getData()));
+                            } else {
+                                System.out.println("收到非预期响应: " + msg.getCommandType());
+                            }
+                            ctx.close();
+                        }
+                    });
 
             ChannelFuture f = b.connect("localhost", 5369).sync();
             Channel channel = f.channel();
@@ -246,16 +235,8 @@ public class ExampleApp {
     private static void runLeakTest() throws Exception {
         NioEventLoopGroup group = new NioEventLoopGroup();
         try {
-            Bootstrap b = new Bootstrap();
-            b.group(group)
-             .channel(NioSocketChannel.class)
-             .handler(new ChannelInitializer<SocketChannel>() {
-                 @Override
-                 protected void initChannel(SocketChannel ch) {
-                     ch.pipeline().addLast(new PacketDecoder());
-                     ch.pipeline().addLast(new PacketEncoder());
-                 }
-             });
+            // 使用通用工具类创建 Bootstrap (无业务 Handler)
+            Bootstrap b = NettyClientBootstrap.createWithHandler(group);
 
             ChannelFuture f = b.connect("localhost", 5369).sync();
             Channel channel = f.channel();
@@ -311,28 +292,20 @@ public class ExampleApp {
             executor.submit(() -> {
                 try {
                     String hash = (fixedHash != null) ? fixedHash : "FILE_HASH_" + index;
-                    Bootstrap b = new Bootstrap();
-                    b.group(group)
-                     .channel(NioSocketChannel.class)
-                     .handler(new ChannelInitializer<SocketChannel>() {
-                         @Override
-                         protected void initChannel(SocketChannel ch) {
-                             ch.pipeline().addLast(new PacketDecoder());
-                             ch.pipeline().addLast(new PacketEncoder());
-                             ch.pipeline().addLast(new SimpleChannelInboundHandler<Packet>() {
-                                 @Override
-                                 protected void channelRead0(ChannelHandlerContext ctx, Packet msg) {
-                                     if (msg.getCommandType() == CommandType.NAMENODE_RESPONSE_ALLOW) {
-                                         allowCount.incrementAndGet();
-                                     } else if (msg.getCommandType() == CommandType.NAMENODE_RESPONSE_WAIT) {
-                                         waitCount.incrementAndGet();
-                                     }
-                                     ctx.close();
-                                     latch.countDown();
-                                 }
-                             });
-                         }
-                     });
+                    // 使用通用工具类创建 Bootstrap
+                    Bootstrap b = NettyClientBootstrap.createWithHandler(group,
+                            new SimpleChannelInboundHandler<Packet>() {
+                                @Override
+                                protected void channelRead0(ChannelHandlerContext ctx, Packet msg) {
+                                    if (msg.getCommandType() == CommandType.NAMENODE_RESPONSE_ALLOW) {
+                                        allowCount.incrementAndGet();
+                                    } else if (msg.getCommandType() == CommandType.NAMENODE_RESPONSE_WAIT) {
+                                        waitCount.incrementAndGet();
+                                    }
+                                    ctx.close();
+                                    latch.countDown();
+                                }
+                            });
                     ChannelFuture f = b.connect("localhost", 5368).sync();
                     Packet packet = new Packet();
                     packet.setCommandType(CommandType.NAMENODE_PRE_UPLOAD);

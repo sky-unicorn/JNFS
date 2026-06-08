@@ -5,8 +5,9 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.DefaultFileRegion;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
-import org.jnfs.common.Constants;
+import org.jnfs.common.NettyHandlerHelper;
 import org.jnfs.common.Packet;
+import org.jnfs.common.SegmentedLocks;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,9 +61,9 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
     private void handlePacket(ChannelHandlerContext ctx, Packet packet) {
         // 验证 Token (仅针对控制指令)
-        if (!Constants.getValidToken().equals(packet.getToken())) {
+        if (!NettyHandlerHelper.validateToken(packet.getToken())) {
             LOG.warn("安全拦截: 无效的 Token");
-            sendResponse(ctx, CommandType.ERROR, "Authentication Failed".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "Authentication Failed".getBytes(StandardCharsets.UTF_8));
             ctx.close();
             return;
         }
@@ -77,7 +78,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     private void initiateUpload(ChannelHandlerContext ctx, Packet packet) {
         byte[] data = packet.getData();
         if (data == null || data.length == 0) {
-            sendResponse(ctx, CommandType.ERROR, "无效的元数据".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "无效的元数据".getBytes(StandardCharsets.UTF_8));
             return;
         }
 
@@ -110,7 +111,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             }
         } catch (IOException e) {
             LOG.error("文件上传初始化失败", e);
-            sendResponse(ctx, CommandType.ERROR, ("服务端错误: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, ("服务端错误: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
         }
     }
 
@@ -130,23 +131,18 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         } catch (IOException e) {
             LOG.error("文件块写入失败", e);
             closeCurrentFile();
-            sendResponse(ctx, CommandType.ERROR, ("写入错误: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, ("写入错误: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
         }
     }
 
-    // 锁分段数组，用于减小锁粒度 (128个分段锁)，替代原有的全局锁
-    private static final Object[] SEGMENT_LOCKS = new Object[128];
-    static {
-        for (int i = 0; i < SEGMENT_LOCKS.length; i++) {
-            SEGMENT_LOCKS[i] = new Object();
-        }
-    }
+    // 锁分段数组 (使用通用工具类)
+    private static final SegmentedLocks segmentedLocks = new SegmentedLocks(128);
 
     /**
      * 获取分段锁
      */
     private Object getLock(String key) {
-        return SEGMENT_LOCKS[Math.abs(key.hashCode() % SEGMENT_LOCKS.length)];
+        return segmentedLocks.getLock(key);
     }
 
     private void finishUpload(ChannelHandlerContext ctx) {
@@ -160,7 +156,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             LOG.error("获取存储文件路径失败", e);
             // 尝试手动删除失败的 tmp
             if (currentTmpFile != null) currentTmpFile.delete();
-            sendResponse(ctx, CommandType.ERROR, ("文件存储失败(路径校验错误): " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, ("文件存储失败(路径校验错误): " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
             return;
         }
 
@@ -170,7 +166,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             if (finalFile.exists()) {
                 LOG.info("文件已存在，跳过重命名: {}", currentFileName);
                 currentTmpFile.delete();
-                sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功(秒传): " + currentFileName).getBytes(StandardCharsets.UTF_8));
+                NettyHandlerHelper.sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功(秒传): " + currentFileName).getBytes(StandardCharsets.UTF_8));
                 // 重置状态
                 resetState();
                 return;
@@ -178,18 +174,18 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
             if (currentTmpFile.renameTo(finalFile)) {
                 LOG.info("文件存储完成: {}", currentFileName);
-                sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
+                NettyHandlerHelper.sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
             } else {
                 // 双重检查: 可能在重命名的一瞬间被其他线程抢先了 (虽然有 FILE_LOCK，但防御性编程)
                 if (finalFile.exists()) {
                      LOG.info("重命名失败但文件已存在 (并发上传): {}", currentFileName);
                      currentTmpFile.delete();
-                     sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
+                     NettyHandlerHelper.sendResponse(ctx, CommandType.UPLOAD_RESPONSE, ("上传成功: " + currentFileName).getBytes(StandardCharsets.UTF_8));
                 } else {
                     LOG.error("重命名临时文件失败: {}", currentTmpFile.getAbsolutePath());
                     // 尝试手动删除失败的 tmp
                     currentTmpFile.delete();
-                    sendResponse(ctx, CommandType.ERROR, "文件存储失败(重命名错误)".getBytes(StandardCharsets.UTF_8));
+                    NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "文件存储失败(重命名错误)".getBytes(StandardCharsets.UTF_8));
                 }
             }
         }
@@ -212,12 +208,12 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         try {
             file = getStorageFile(filename);
         } catch (IOException e) {
-            sendResponse(ctx, CommandType.ERROR, ("非法的文件名: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, ("非法的文件名: " + e.getMessage()).getBytes(StandardCharsets.UTF_8));
             return;
         }
 
         if (!file.exists()) {
-            sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));
             return;
         }
 
@@ -317,13 +313,6 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         }
         currentFileChannel = null;
         currentFos = null;
-    }
-
-    private void sendResponse(ChannelHandlerContext ctx, CommandType type, byte[] data) {
-        Packet response = new Packet();
-        response.setCommandType(type);
-        response.setData(data);
-        ctx.writeAndFlush(response);
     }
 
     @Override

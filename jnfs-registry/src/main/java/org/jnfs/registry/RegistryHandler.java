@@ -4,7 +4,8 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
-import org.jnfs.common.Constants;
+import org.jnfs.common.DaemonThreadFactory;
+import org.jnfs.common.NettyHandlerHelper;
 import org.jnfs.common.Packet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,12 +50,9 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     // 心跳超时时间 (默认30秒)，可由 RegistryServer 启动时修改
     public static volatile long heartbeatTimeout = 30 * 1000;
 
-    // 主动清理过期节点的定时任务
-    private static final ScheduledExecutorService cleanerExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "Registry-Cleaner");
-        t.setDaemon(true); // 设置为守护线程，随JVM退出
-        return t;
-    });
+    // 主动清理过期节点的定时任务 (使用统一的 Daemon 线程工厂)
+    private static final ScheduledExecutorService cleanerExecutor = Executors.newSingleThreadScheduledExecutor(
+            new DaemonThreadFactory("Registry-Cleaner"));
 
     static {
         // 每 10 秒执行一次清理检查
@@ -94,9 +92,9 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exception {
-        if (!Constants.getValidToken().equals(packet.getToken())) {
+        if (!NettyHandlerHelper.validateToken(packet.getToken())) {
             LOG.warn("Registry 安全拦截: 无效的 Token - {}", ctx.channel().remoteAddress());
-            sendResponse(ctx, CommandType.ERROR, "Authentication Failed".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "Authentication Failed".getBytes(StandardCharsets.UTF_8));
             ctx.close();
             return;
         }
@@ -118,7 +116,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
                 handleGetNameNodes(ctx);
                 break;
             default:
-                sendResponse(ctx, CommandType.ERROR, "未知命令".getBytes(StandardCharsets.UTF_8));
+                NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "未知命令".getBytes(StandardCharsets.UTF_8));
         }
     }
 
@@ -143,7 +141,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
         if (packet.getCommandType() == CommandType.REGISTRY_REGISTER) {
             LOG.info("DataNode 注册成功: {}", address);
-            sendResponse(ctx, CommandType.REGISTRY_RESPONSE_REGISTER, "OK".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.REGISTRY_RESPONSE_REGISTER, "OK".getBytes(StandardCharsets.UTF_8));
         }
     }
 
@@ -154,7 +152,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
         if (packet.getCommandType() == CommandType.REGISTRY_REGISTER_NAMENODE) {
             LOG.info("NameNode 注册成功: {}", address);
-            sendResponse(ctx, CommandType.REGISTRY_RESPONSE_REGISTER_NAMENODE, "OK".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.REGISTRY_RESPONSE_REGISTER_NAMENODE, "OK".getBytes(StandardCharsets.UTF_8));
         }
     }
 
@@ -169,7 +167,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         }
 
         String response = String.join(",", activeNodes);
-        sendResponse(ctx, CommandType.REGISTRY_RESPONSE_DATANODES, response.getBytes(StandardCharsets.UTF_8));
+        NettyHandlerHelper.sendResponse(ctx, CommandType.REGISTRY_RESPONSE_DATANODES, response.getBytes(StandardCharsets.UTF_8));
     }
 
     private void handleGetNameNodes(ChannelHandlerContext ctx) {
@@ -183,14 +181,7 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         }
 
         String response = String.join(",", activeNodes);
-        sendResponse(ctx, CommandType.REGISTRY_RESPONSE_NAMENODES, response.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private void sendResponse(ChannelHandlerContext ctx, CommandType type, byte[] data) {
-        Packet response = new Packet();
-        response.setCommandType(type);
-        response.setData(data);
-        ctx.writeAndFlush(response);
+        NettyHandlerHelper.sendResponse(ctx, CommandType.REGISTRY_RESPONSE_NAMENODES, response.getBytes(StandardCharsets.UTF_8));
     }
 
     @Override

@@ -6,8 +6,9 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
-import org.jnfs.common.Constants;
+import org.jnfs.common.NettyHandlerHelper;
 import org.jnfs.common.Packet;
+import org.jnfs.common.SegmentedLocks;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -62,19 +63,14 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     // 负载均衡器
     private static final LoadBalancer loadBalancer = new WeightedRandomStrategy();
 
-    // 锁分段数组，用于减小锁粒度 (128个分段锁)
-    private static final Object[] SEGMENT_LOCKS = new Object[128];
-    static {
-        for (int i = 0; i < SEGMENT_LOCKS.length; i++) {
-            SEGMENT_LOCKS[i] = new Object();
-        }
-    }
+    // 锁分段数组 (使用通用工具类)
+    private static final SegmentedLocks segmentedLocks = new SegmentedLocks(128);
 
     /**
      * 获取分段锁
      */
     private Object getLock(String key) {
-        return SEGMENT_LOCKS[Math.abs(key.hashCode() % SEGMENT_LOCKS.length)];
+        return segmentedLocks.getLock(key);
     }
 
     /**
@@ -127,9 +123,9 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exception {
-        if (!validateToken(packet.getToken())) {
+        if (!NettyHandlerHelper.validateToken(packet.getToken())) {
             LOG.warn("安全拦截: 无效的 Token - {}", ctx.channel().remoteAddress());
-            sendResponse(ctx, CommandType.ERROR, "Authentication Failed: Invalid Token".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "Authentication Failed: Invalid Token".getBytes(StandardCharsets.UTF_8));
             return;
         }
 
@@ -151,25 +147,21 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
                 handleDownloadLocRequest(ctx, packet);
                 break;
             default:
-                sendResponse(ctx, CommandType.ERROR, "未知命令".getBytes(StandardCharsets.UTF_8));
+                NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "未知命令".getBytes(StandardCharsets.UTF_8));
         }
-    }
-
-    private boolean validateToken(String token) {
-        return Constants.getValidToken().equals(token);
     }
 
     private void handleCheckExistence(ChannelHandlerContext ctx, Packet packet) {
         String hash = new String(packet.getData(), StandardCharsets.UTF_8);
-        
+
         // 1. 查缓存/持久层
         MetadataCacheManager.MetadataEntry entry = cacheManager.get(hash);
 
         if (entry != null) {
             LOG.info("命中秒传: Hash={}", hash);
-            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, entry.address.getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, entry.address.getBytes(StandardCharsets.UTF_8));
         } else {
-            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_NOT_EXIST, "Not Found".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_NOT_EXIST, "Not Found".getBytes(StandardCharsets.UTF_8));
         }
     }
 
@@ -180,7 +172,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             // 1. 查缓存/持久层
             MetadataCacheManager.MetadataEntry entry = cacheManager.get(hash);
             if (entry != null) {
-                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, entry.address.getBytes(StandardCharsets.UTF_8));
+                NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, entry.address.getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
@@ -193,7 +185,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
                 // 2. 尝试获取分布式锁
                 if (!metadataManager.tryAcquireUploadLock(hash, NODE_ID)) {
                     LOG.info("获取集群锁失败 (正在上传中): Hash={}", hash);
-                    sendResponse(ctx, CommandType.NAMENODE_RESPONSE_WAIT, "Cluster-Waiting".getBytes(StandardCharsets.UTF_8));
+                    NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_WAIT, "Cluster-Waiting".getBytes(StandardCharsets.UTF_8));
                     return;
                 }
             }
@@ -204,19 +196,19 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
                 if (metadataManager != null) {
                     metadataManager.releaseUploadLock(hash);
                 }
-                sendResponse(ctx, CommandType.NAMENODE_RESPONSE_WAIT, "Waiting".getBytes(StandardCharsets.UTF_8));
+                NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_WAIT, "Waiting".getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
             pendingUploads.put(hash, true);
             LOG.info("允许上传: Hash={}", hash);
-            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_ALLOW, "OK".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_ALLOW, "OK".getBytes(StandardCharsets.UTF_8));
         }
     }
 
     private void handleUploadLocRequest(ChannelHandlerContext ctx) {
         if (dataNodes.isEmpty()) {
-            sendResponse(ctx, CommandType.ERROR, "无可用 DataNode".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "无可用 DataNode".getBytes(StandardCharsets.UTF_8));
             return;
         }
 
@@ -225,9 +217,9 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
         if (selectedNode != null) {
             // 响应中只包含 host:port，不需要 freeSpace
-            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_UPLOAD_LOC, selectedNode.getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_UPLOAD_LOC, selectedNode.getBytes(StandardCharsets.UTF_8));
         } else {
-            sendResponse(ctx, CommandType.ERROR, "选择 DataNode 失败".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "选择 DataNode 失败".getBytes(StandardCharsets.UTF_8));
         }
     }
 
@@ -235,7 +227,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         String data = new String(packet.getData(), StandardCharsets.UTF_8);
         String[] parts = data.split("\\|");
         if (parts.length != 3) {
-            sendResponse(ctx, CommandType.ERROR, "格式错误".getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "格式错误".getBytes(StandardCharsets.UTF_8));
             return;
         }
 
@@ -249,7 +241,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         MetadataCacheManager.MetadataEntry existing = cacheManager.get(hash);
         if (existing != null) {
              LOG.info("忽略重复元数据提交 (已存在): {}", filename);
-             sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, existing.storageId.getBytes(StandardCharsets.UTF_8));
+             NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, existing.storageId.getBytes(StandardCharsets.UTF_8));
              return;
         }
 
@@ -257,7 +249,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             // 双重检查
             existing = cacheManager.get(hash);
             if (existing != null) {
-                 sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, existing.storageId.getBytes(StandardCharsets.UTF_8));
+                 NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, existing.storageId.getBytes(StandardCharsets.UTF_8));
                  return;
             }
 
@@ -280,7 +272,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
                 if (metadataManager != null) {
                     metadataManager.releaseUploadLock(hash);
                 }
-                sendResponse(ctx, CommandType.ERROR, "Metadata Persistence Failed".getBytes(StandardCharsets.UTF_8));
+                NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "Metadata Persistence Failed".getBytes(StandardCharsets.UTF_8));
                 return;
             }
             
@@ -290,7 +282,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             LOG.info("文件已注册并持久化: {}, ID: {}", filename, storageId);
         }
 
-        sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
+        NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_COMMIT, storageId.getBytes(StandardCharsets.UTF_8));
     }
 
     private void handleDownloadLocRequest(ChannelHandlerContext ctx, Packet packet) {
@@ -308,18 +300,11 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         
         if (entry != null) {
             String response = entry.filename + "|" + entry.hash + "|" + entry.address;
-            sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, response.getBytes(StandardCharsets.UTF_8));
+            NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, response.getBytes(StandardCharsets.UTF_8));
             return;
         }
 
-        sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));
-    }
-
-    private void sendResponse(ChannelHandlerContext ctx, CommandType type, byte[] data) {
-        Packet response = new Packet();
-        response.setCommandType(type);
-        response.setData(data);
-        ctx.writeAndFlush(response);
+        NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "文件不存在".getBytes(StandardCharsets.UTF_8));
     }
 
     @Override

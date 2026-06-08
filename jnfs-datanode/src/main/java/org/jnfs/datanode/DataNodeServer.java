@@ -13,36 +13,30 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.jnfs.common.ChannelPoolUtils;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.ConfigUtil;
 import org.jnfs.common.Constants;
+import org.jnfs.common.DaemonThreadFactory;
+import org.jnfs.common.NetUtils;
 import org.jnfs.common.NettyServerUtils;
+import org.jnfs.common.ServerShutdownHelper;
 import org.jnfs.common.SecurityConfig;
 import org.jnfs.common.Packet;
-import org.jnfs.common.PacketDecoder;
-import org.jnfs.common.PacketEncoder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import cn.hutool.core.io.FileUtil;
-import cn.hutool.core.net.NetUtil;
-import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import io.netty.channel.pool.AbstractChannelPoolMap;
-import io.netty.channel.pool.ChannelPoolHandler;
 import io.netty.channel.pool.ChannelPoolMap;
-import io.netty.channel.pool.FixedChannelPool;
 import io.netty.channel.pool.SimpleChannelPool;
-import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
 import io.netty.util.concurrent.Future;
@@ -79,47 +73,22 @@ public class DataNodeServer {
         this.advertisedHost = advertisedHost;
         this.storagePaths = storagePaths;
         this.registryAddresses = registryAddresses;
-        
+
         // 初始化共享的 Worker Group
         this.workerGroup = new NioEventLoopGroup();
-        
-        // 初始化连接池
-        this.registryPoolMap = new AbstractChannelPoolMap<InetSocketAddress, SimpleChannelPool>() {
-            @Override
-            protected SimpleChannelPool newPool(InetSocketAddress key) {
-                Bootstrap b = new Bootstrap()
-                        .group(workerGroup)
-                        .channel(NioSocketChannel.class)
-                        .option(ChannelOption.TCP_NODELAY, true)
-                        .option(ChannelOption.SO_KEEPALIVE, true);
-                        
-                // 使用 FixedChannelPool 限制最大连接数 (每 Registry 10 连接)
-                return new FixedChannelPool(b.remoteAddress(key), new RegistryChannelPoolHandler(), 10);
-            }
-        };
 
-        // 初始化调度器 (Daemon 线程)
-        this.heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-            @Override
-            public Thread newThread(Runnable r) {
-                Thread t = new Thread(r, "DataNode-Heartbeat");
-                t.setDaemon(true);
-                return t;
-            }
-        });
+        // 初始化连接池 (使用通用工具类)
+        this.registryPoolMap = ChannelPoolUtils.createDefaultPoolMap(workerGroup);
 
-        this.gcScheduler = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
-            @Override
-            public Thread newThread(Runnable r) {
-                Thread t = new Thread(r, "DataNode-GC");
-                t.setDaemon(true);
-                return t;
-            }
-        });
+        // 初始化调度器 (使用统一的 Daemon 线程工厂)
+        this.heartbeatScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                new DaemonThreadFactory("DataNode-Heartbeat"));
+        this.gcScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
+                new DaemonThreadFactory("DataNode-GC"));
     }
 
     // 运行标志
-    private volatile boolean running = true;
+    private final AtomicBoolean running = new AtomicBoolean(true);
 
     public void run() throws Exception {
         // 启动后台线程负责注册和心跳
@@ -153,52 +122,9 @@ public class DataNodeServer {
      * 统一的资源释放方法，支持幂等调用
      */
     private void shutdown() {
-        if (!running) {
-            return;
-        }
-        running = false;
-        
-        LOG.info("正在停止 DataNodeServer 资源...");
-
-        // 关闭调度器
-        if (heartbeatScheduler != null && !heartbeatScheduler.isShutdown()) {
-            heartbeatScheduler.shutdownNow();
-        }
-        if (gcScheduler != null && !gcScheduler.isShutdown()) {
-            gcScheduler.shutdownNow();
-        }
-
-        // 关闭连接池资源
-        // ChannelPoolMap (AbstractChannelPoolMap) 实现了 Iterable 接口
-        if (registryPoolMap instanceof Iterable) {
-            for (Object poolObj : (Iterable<?>) registryPoolMap) {
-                if (poolObj instanceof SimpleChannelPool) {
-                    try {
-                        ((SimpleChannelPool) poolObj).close();
-                    } catch (Exception e) {
-                         LOG.warn("关闭连接池异常: {}", e.getMessage());
-                    }
-                } else if (poolObj instanceof Map.Entry) {
-                     // AbstractChannelPoolMap 的 iterator 返回的是 Map.Entry? 
-                     // 查看源码: AbstractChannelPoolMap 实现了 Iterable<Map.Entry<K, P>>
-                     Object value = ((Map.Entry<?, ?>) poolObj).getValue();
-                     if (value instanceof SimpleChannelPool) {
-                         try {
-                             ((SimpleChannelPool) value).close();
-                         } catch (Exception e) {
-                             LOG.warn("关闭连接池异常: {}", e.getMessage());
-                         }
-                     }
-                }
-            }
-        }
-
-        // 关闭 Worker Group
-        if (workerGroup != null && !workerGroup.isShutdown()) {
-            workerGroup.shutdownGracefully();
-        }
-        
-        LOG.info("DataNodeServer 资源释放完成");
+        ServerShutdownHelper.shutdownAll(LOG, "DataNodeServer", running,
+                new ScheduledExecutorService[]{heartbeatScheduler, gcScheduler},
+                registryPoolMap, workerGroup);
     }
 
     private void startHeartbeatThread() {
@@ -258,7 +184,7 @@ public class DataNodeServer {
         for (InetSocketAddress addr : registryAddresses) {
             SimpleChannelPool pool = registryPoolMap.get(addr);
             Future<Channel> future = pool.acquire();
-            
+
             future.addListener((FutureListener<Channel>) f -> {
                 if (f.isSuccess()) {
                     Channel ch = f.getNow();
@@ -307,8 +233,8 @@ public class DataNodeServer {
 
         Map<String, Object> serverConfig = (Map<String, Object>) config.get("server");
         int port = (int) serverConfig.getOrDefault("port", 5369);
-        // 如果没有配置 advertised_host，则自动获取本机 IP
-        String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtil.getLocalhostStr());
+        // 如果没有配置 advertised_host，则自动获取本机 IP (统一使用项目自带的 NetUtils)
+        String advertisedHost = (String) serverConfig.getOrDefault("advertised_host", NetUtils.getLocalIp());
 
         Map<String, Object> storageConfig = (Map<String, Object>) config.get("storage");
         List<String> storagePaths = new ArrayList<>();
@@ -330,21 +256,5 @@ public class DataNodeServer {
         LOG.info("对外广播地址: {}", advertisedHost);
 
         new DataNodeServer(port, advertisedHost, storagePaths, registryAddresses).run();
-    }
-    
-    // --- 连接池 Handler ---
-    private static class RegistryChannelPoolHandler implements ChannelPoolHandler {
-        @Override
-        public void channelReleased(Channel ch) throws Exception {}
-
-        @Override
-        public void channelAcquired(Channel ch) throws Exception {}
-
-        @Override
-        public void channelCreated(Channel ch) throws Exception {
-            // 初始化 Pipeline
-            ch.pipeline().addLast(new PacketDecoder());
-            ch.pipeline().addLast(new PacketEncoder());
-        }
     }
 }
