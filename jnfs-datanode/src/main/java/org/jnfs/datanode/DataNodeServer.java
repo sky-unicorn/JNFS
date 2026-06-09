@@ -20,8 +20,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.jnfs.common.ChannelPoolUtils;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.ConfigUtil;
-import org.jnfs.common.Constants;
 import org.jnfs.common.DaemonThreadFactory;
+import org.jnfs.common.HeartbeatSender;
 import org.jnfs.common.NetUtils;
 import org.jnfs.common.NettyServerUtils;
 import org.jnfs.common.ServerShutdownHelper;
@@ -31,16 +31,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import cn.hutool.core.io.FileUtil;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.pool.ChannelPoolMap;
 import io.netty.channel.pool.SimpleChannelPool;
 import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.EventExecutorGroup;
-import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.FutureListener;
 
 /**
  * DataNode 服务启动类
@@ -130,11 +126,26 @@ public class DataNodeServer {
     private void startHeartbeatThread() {
         heartbeatScheduler.scheduleAtFixedRate(() -> {
             try {
-                sendHeartbeatToRegistry();
+                long totalFreeSpace = computeTotalFreeSpace();
+                String payload = advertisedHost + ":" + port + "|" + totalFreeSpace;
+                HeartbeatSender.broadcastString(LOG, registryPoolMap, registryAddresses,
+                        CommandType.REGISTRY_HEARTBEAT, addr -> payload);
             } catch (Exception e) {
                 LOG.error("发送心跳失败: {}", e.getMessage(), e);
             }
         }, 2, 5, TimeUnit.SECONDS);
+    }
+
+    private long computeTotalFreeSpace() {
+        long total = 0;
+        for (String path : storagePaths) {
+            File storeDir = new File(path);
+            if (!storeDir.exists()) {
+                storeDir.mkdirs();
+            }
+            total += storeDir.getFreeSpace();
+        }
+        return total;
     }
 
     /**
@@ -177,51 +188,6 @@ public class DataNodeServer {
                 }
             });
         }
-    }
-
-    private void sendHeartbeatToRegistry() {
-        // 向所有配置的 Registry 发送心跳 (广播模式)
-        for (InetSocketAddress addr : registryAddresses) {
-            SimpleChannelPool pool = registryPoolMap.get(addr);
-            Future<Channel> future = pool.acquire();
-
-            future.addListener((FutureListener<Channel>) f -> {
-                if (f.isSuccess()) {
-                    Channel ch = f.getNow();
-                    try {
-                        doSendHeartbeat(ch).addListener(writeFuture -> {
-                            // 写入完成后释放连接
-                            pool.release(ch);
-                        });
-                    } catch (Exception e) {
-                        pool.release(ch);
-                        LOG.error("发送心跳异常 ({}) : {}", addr, e.getMessage());
-                    }
-                } else {
-                    LOG.warn("连接注册中心失败 ({}) : {}", addr, f.cause().getMessage());
-                }
-            });
-        }
-    }
-
-    private ChannelFuture doSendHeartbeat(Channel channel) {
-        long totalFreeSpace = 0;
-        for (String path : storagePaths) {
-            File storeDir = new File(path);
-            if (!storeDir.exists()) {
-                storeDir.mkdirs();
-            }
-            totalFreeSpace += storeDir.getFreeSpace();
-        }
-
-        String payload = advertisedHost + ":" + port + "|" + totalFreeSpace;
-
-        Packet packet = new Packet();
-        packet.setCommandType(CommandType.REGISTRY_HEARTBEAT);
-        packet.setToken(Constants.getValidToken());
-        packet.setData(payload.getBytes(StandardCharsets.UTF_8));
-
-        return channel.writeAndFlush(packet);
     }
 
     @SuppressWarnings("unchecked")
