@@ -63,15 +63,8 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     // 负载均衡器
     private static final LoadBalancer loadBalancer = new WeightedRandomStrategy();
 
-    // 锁分段数组 (使用通用工具类)
-    private static final SegmentedLocks segmentedLocks = new SegmentedLocks(128);
-
-    /**
-     * 获取分段锁
-     */
-    private Object getLock(String key) {
-        return segmentedLocks.getLock(key);
-    }
+    // 分段锁 (使用通用工具类)
+    private static final SegmentedLocks LOCKS = new SegmentedLocks(128);
 
     /**
      * 初始化元数据管理器 (由 NameNodeServer 启动时调用)
@@ -168,7 +161,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     private void handlePreUpload(ChannelHandlerContext ctx, Packet packet) {
         String hash = new String(packet.getData(), StandardCharsets.UTF_8);
 
-        synchronized (getLock(hash)) {
+        synchronized (LOCKS.getLock(hash)) {
             // 1. 查缓存/持久层
             MetadataCacheManager.MetadataEntry entry = cacheManager.get(hash);
             if (entry != null) {
@@ -245,7 +238,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
              return;
         }
 
-        synchronized (getLock(hash)) {
+        synchronized (LOCKS.getLock(hash)) {
             // 双重检查
             existing = cacheManager.get(hash);
             if (existing != null) {

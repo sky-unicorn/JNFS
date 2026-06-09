@@ -135,15 +135,8 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         }
     }
 
-    // 锁分段数组 (使用通用工具类)
-    private static final SegmentedLocks segmentedLocks = new SegmentedLocks(128);
-
-    /**
-     * 获取分段锁
-     */
-    private Object getLock(String key) {
-        return segmentedLocks.getLock(key);
-    }
+    // 使用通用工具类提供分段锁
+    private static final SegmentedLocks LOCKS = new SegmentedLocks(128);
 
     private void finishUpload(ChannelHandlerContext ctx) {
         closeCurrentFile();
@@ -161,7 +154,7 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         }
 
         // 使用分段锁，仅锁定当前文件 Hash 对应的分段，避免全局竞争
-        synchronized (getLock(currentFileName)) {
+        synchronized (LOCKS.getLock(currentFileName)) {
             // 如果目标文件已存在，直接删除临时文件并返回成功 (视为幂等上传)
             if (finalFile.exists()) {
                 LOG.info("文件已存在，跳过重命名: {}", currentFileName);
