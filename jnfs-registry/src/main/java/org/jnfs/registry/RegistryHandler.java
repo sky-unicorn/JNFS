@@ -189,4 +189,14 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         LOG.error("RegistryHandler异常", cause);
         ctx.close();
     }
+
+    /**
+     * 关闭 RegistryHandler 的内部资源（定时清理任务）
+     */
+    public static void shutdown() {
+        if (cleanerExecutor != null && !cleanerExecutor.isShutdown()) {
+            cleanerExecutor.shutdownNow();
+            LOG.info("Registry-Cleaner 已关闭");
+        }
+    }
 }

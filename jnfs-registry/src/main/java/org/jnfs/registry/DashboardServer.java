@@ -16,6 +16,7 @@ public class DashboardServer {
     private static final Logger LOG = LoggerFactory.getLogger(DashboardServer.class);
 
     private final int port;
+    private com.sun.net.httpserver.HttpServer server;
 
     public DashboardServer(int port) {
         this.port = port;
@@ -23,7 +24,7 @@ public class DashboardServer {
 
     public void start() {
         try {
-            com.sun.net.httpserver.HttpServer server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress(port), 0);
+            server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress(port), 0);
 
             server.createContext("/", new DashboardHttpHandler());
 
@@ -52,6 +53,13 @@ public class DashboardServer {
             LOG.info("JNFS Dashboard 启动成功，访问地址: http://localhost:{}", port);
         } catch (Exception e) {
             LOG.error("Dashboard启动失败", e);
+        }
+    }
+
+    public void stop() {
+        if (server != null) {
+            server.stop(0);
+            LOG.info("Dashboard 已停止");
         }
     }
 

@@ -536,15 +536,17 @@ static final byte[] DEFAULT_AES_KEY = "jnfs-aes-key-256bit-secure-key!!".getByte
 
 ---
 
-### [P1-高] QA-005: RegistryServer 无优雅关闭
-
-**文件**: `RegistryServer.java`
+### ~~[P1-高] QA-005: RegistryServer 无优雅关闭~~ **[已修复 2026-06-09]**
 
 **问题**: NameNodeServer 和 DataNodeServer 均有 shutdown hook + `ServerShutdownHelper`，但 RegistryServer 完全缺失。Dashboard HTTP Server 和 Cleaner 线程池无法释放。
 
-**影响**: Registry 关闭时资源泄漏。
+**修复方案**: 三处修改实现完整优雅关闭：
 
-**方案**: 为 RegistryServer 添加 `Runtime.addShutdownHook()`。
+1. **DashboardServer**: 将 `HttpServer` 从局部变量提升为实例字段 `httpServer`，新增 `stop()` 方法调用 `httpServer.stop(0)`，使 Dashboard HTTP 服务可被外部关闭。
+
+2. **RegistryHandler**: 新增 `shutdown()` 静态方法，关闭内部 `cleanerExecutor`（定时清理过期节点的 ScheduledExecutorService）。
+
+3. **RegistryServer**: 添加 `AtomicBoolean running` 幂等标志 + `DashboardServer` 实例引用 + `Runtime.addShutdownHook()` + `shutdown()` 方法。`shutdown()` 按序关闭：Dashboard HTTP → RegistryHandler cleaner。Netty EventLoopGroup 由 `NettyServerUtils.start0()` 内部 finally 块负责。编译验证通过（BUILD SUCCESS）。
 
 ---
 
@@ -676,7 +678,7 @@ String downloadPath = "D:\\data\\jnfs\\download\\";
 | 7 | BACK-002 | 后端 | P0 | File 模式 queryByHash 恒返回 null | 缓存禁用后文件"丢失" |
 | 8 | BACK-004 | 后端 | P0 | file_metadata 无 hash UNIQUE 约束 | 重复记录永久存在 |
 | 9 | ARCH-001 | 架构 | P0 | DataNode 无副本，单点故障 | 数据丢失 |
-| 10 | QA-005 | 质量 | P1 | RegistryServer 无优雅关闭 | 资源泄漏 |
+| 10 | ~~QA-005~~ | ~~质量~~ | ~~P1~~ | ~~RegistryServer 无优雅关闭 (已修复)~~ | ~~资源泄漏~~ |
 | 11 | QA-006 | 质量 | P1 | mysql/jnfs.sql 含 DROP TABLE | 误执行导致数据丢失 |
 | 12 | ARCH-002 | 架构 | P1 | 协议版本字段未校验 | 无法兼容旧版本 |
 | 13 | BACK-003 | 后端 | P1 | 元数据提交与锁释放竞态窗口 | 多 NameNode 重复上传 |
