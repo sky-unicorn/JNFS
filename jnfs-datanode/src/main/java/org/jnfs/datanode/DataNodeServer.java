@@ -24,6 +24,7 @@ import org.jnfs.common.DaemonThreadFactory;
 import org.jnfs.common.HeartbeatSender;
 import org.jnfs.common.NetUtils;
 import org.jnfs.common.NettyServerUtils;
+import org.jnfs.common.NodeIdManager;
 import org.jnfs.common.ServerShutdownHelper;
 import org.jnfs.common.SecurityConfig;
 import org.jnfs.common.Packet;
@@ -51,6 +52,7 @@ public class DataNodeServer {
 
     private final int port;
     private final String advertisedHost;
+    private final String nodeId;
     private final List<String> storagePaths;
     // 支持多个注册中心地址
     private final List<InetSocketAddress> registryAddresses;
@@ -64,9 +66,10 @@ public class DataNodeServer {
     private final ScheduledExecutorService heartbeatScheduler;
     private final ScheduledExecutorService gcScheduler;
 
-    public DataNodeServer(int port, String advertisedHost, List<String> storagePaths, List<InetSocketAddress> registryAddresses) {
+    public DataNodeServer(int port, String advertisedHost, String nodeId, List<String> storagePaths, List<InetSocketAddress> registryAddresses) {
         this.port = port;
         this.advertisedHost = advertisedHost;
+        this.nodeId = nodeId;
         this.storagePaths = storagePaths;
         this.registryAddresses = registryAddresses;
 
@@ -127,7 +130,8 @@ public class DataNodeServer {
         heartbeatScheduler.scheduleAtFixedRate(() -> {
             try {
                 long totalFreeSpace = computeTotalFreeSpace();
-                String payload = advertisedHost + ":" + port + "|" + totalFreeSpace;
+                // 新格式: node_id|host:port|freeSpace
+                String payload = nodeId + "|" + advertisedHost + ":" + port + "|" + totalFreeSpace;
                 HeartbeatSender.broadcastString(LOG, registryPoolMap, registryAddresses,
                         CommandType.REGISTRY_HEARTBEAT, addr -> payload);
             } catch (Exception e) {
@@ -221,6 +225,10 @@ public class DataNodeServer {
         LOG.info("使用注册中心集群: {}", registryAddresses);
         LOG.info("对外广播地址: {}", advertisedHost);
 
-        new DataNodeServer(port, advertisedHost, storagePaths, registryAddresses).run();
+        // 初始化 node_id (配置指定 > 本地文件 > 自动生成)
+        String nodeId = NodeIdManager.initialize(serverConfig);
+        LOG.info("节点ID: {}", nodeId);
+
+        new DataNodeServer(port, advertisedHost, nodeId, storagePaths, registryAddresses).run();
     }
 }

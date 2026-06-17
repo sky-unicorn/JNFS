@@ -46,14 +46,28 @@ public class MySQLMetadataManager extends MetadataManager {
                 "KEY `idx_hash` (`file_hash`)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
             );
+            // node_registry
+            conn.createStatement().execute(
+                "CREATE TABLE IF NOT EXISTS `node_registry` (" +
+                "`node_id` VARCHAR(128) NOT NULL," +
+                "`node_type` VARCHAR(20) NOT NULL COMMENT 'DATANODE / NAMENODE'," +
+                "`host` VARCHAR(100) NOT NULL," +
+                "`port` INT NOT NULL," +
+                "`last_heartbeat` DATETIME NOT NULL," +
+                "`create_time` DATETIME DEFAULT CURRENT_TIMESTAMP," +
+                "PRIMARY KEY (`node_id`)," +
+                "KEY `idx_type` (`node_type`)" +
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            );
             // file_location
             conn.createStatement().execute(
                 "CREATE TABLE IF NOT EXISTS `file_location` (" +
                 "`id` BIGINT AUTO_INCREMENT PRIMARY KEY," +
                 "`file_hash` CHAR(64) NOT NULL," +
-                "`datanode_addr` VARCHAR(100) NOT NULL," +
+                "`datanode_id` VARCHAR(128) DEFAULT NULL," +
+                "`datanode_addr` VARCHAR(100) DEFAULT NULL," +
                 "`create_time` DATETIME DEFAULT CURRENT_TIMESTAMP," +
-                "UNIQUE KEY `uk_hash_node` (`file_hash`, `datanode_addr`)" +
+                "UNIQUE KEY `uk_hash_node` (`file_hash`, `datanode_id`)" +
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
             );
             // file_upload_lock
@@ -73,20 +87,25 @@ public class MySQLMetadataManager extends MetadataManager {
 
     @Override
     public MetadataCacheManager.MetadataEntry queryByHash(String hash) {
-        String sql = "SELECT m.filename, m.file_hash, m.storage_id, l.datanode_addr " +
+        // address 字段应返回 node_id (datanode_id)，由上层 NodeAddressResolver 解析为 host:port
+        // 这样 IP 变更后仍能通过 node_id 找到最新地址
+        String sql = "SELECT m.filename, m.file_hash, m.storage_id, " +
+                     "COALESCE(l.datanode_id, l.datanode_addr) AS address " +
                      "FROM file_metadata m " +
                      "JOIN file_location l ON m.file_hash = l.file_hash " +
                      "WHERE m.file_hash = ? LIMIT 1";
-        
+
         try (Connection conn = dataSource.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setString(1, hash);
             try (ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
+                    // address 是 node_id (优先)，fallback 到 datanode_addr (旧数据兼容)
+                    String address = rs.getString("address");
                     return new MetadataCacheManager.MetadataEntry(
                         rs.getString("filename"),
                         rs.getString("file_hash"),
-                        rs.getString("datanode_addr"),
+                        address,
                         rs.getString("storage_id")
                     );
                 }
@@ -179,26 +198,27 @@ public class MySQLMetadataManager extends MetadataManager {
         LOG.info("[MySQLMetadataManager] 正在从数据库恢复元数据...");
         int count = 0;
         
-        String sql = "SELECT m.filename, m.file_hash, m.storage_id, l.datanode_addr " +
+        String sql = "SELECT m.filename, m.file_hash, m.storage_id, " +
+                     "COALESCE(l.datanode_id, l.datanode_addr) AS address " +
                      "FROM file_metadata m " +
                      "JOIN file_location l ON m.file_hash = l.file_hash";
-        
+
         try (Connection conn = dataSource.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql);
              ResultSet rs = stmt.executeQuery()) {
-             
+
             while (rs.next()) {
                 String filename = rs.getString("filename");
                 String hash = rs.getString("file_hash");
                 String storageId = rs.getString("storage_id");
-                String address = rs.getString("datanode_addr");
-                
+                String address = rs.getString("address");
+
                 filenameToHash.put(filename, hash);
                 // 注意：如果有多个副本，这里只会覆盖为最后一个 (当前架构只支持单副本)
                 hashToStorage.put(hash, address);
                 hashToId.put(hash, storageId);
                 persistedHashes.add(hash);
-                
+
                 count++;
             }
         } catch (SQLException e) {
@@ -224,11 +244,15 @@ public class MySQLMetadataManager extends MetadataManager {
                     stmt.executeUpdate();
                 }
                 
-                // 2. 插入 location (如果已存在则忽略，用于秒传场景)
-                String sqlLoc = "INSERT IGNORE INTO file_location (file_hash, datanode_addr) VALUES (?, ?)";
+                // 2. 插入 location (datanode_id 存储 node_id, datanode_addr 保留兼容)
+                String sqlLoc = "INSERT IGNORE INTO file_location (file_hash, datanode_id, datanode_addr) VALUES (?, ?, ?)";
                 try (PreparedStatement stmt = conn.prepareStatement(sqlLoc)) {
                     stmt.setString(1, hash);
+                    // address 现在存储的是 node_id
                     stmt.setString(2, address);
+                    // datanode_addr 通过 NodeAddressResolver 解析为 host:port（兼容过渡）
+                    String hostPort = org.jnfs.common.NodeAddressResolver.resolve(address);
+                    stmt.setString(3, hostPort);
                     stmt.executeUpdate();
                 }
 

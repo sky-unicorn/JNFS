@@ -71,18 +71,25 @@ public class DashboardServer {
         long now = System.currentTimeMillis();
         for (Map.Entry<String, RegistryHandler.NodeInfo> entry : nodes.entrySet()) {
             if (i > 0) sb.append(",");
+            RegistryHandler.NodeInfo info = entry.getValue();
             sb.append("{");
-            sb.append("\"address\":\"").append(entry.getKey()).append("\",");
-            sb.append("\"freeSpace\":").append(entry.getValue().freeSpace).append(",");
-            sb.append("\"lastHeartbeat\":").append(entry.getValue().lastHeartbeatTime).append(",");
+            sb.append("\"nodeId\":\"").append(escapeJson(info.nodeId)).append("\",");
+            sb.append("\"address\":\"").append(escapeJson(info.address)).append("\",");
+            sb.append("\"freeSpace\":").append(info.freeSpace).append(",");
+            sb.append("\"lastHeartbeat\":").append(info.lastHeartbeatTime).append(",");
             // 服务端计算状态，避免客户端时间不一致导致误判
-            boolean isOnline = (now - entry.getValue().lastHeartbeatTime) < RegistryHandler.heartbeatTimeout;
+            boolean isOnline = (now - info.lastHeartbeatTime) < RegistryHandler.heartbeatTimeout;
             sb.append("\"status\":\"").append(isOnline ? "online" : "offline").append("\"");
             sb.append("}");
             i++;
         }
         sb.append("]");
         return sb.toString();
+    }
+
+    private static String escapeJson(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     private String getSecurityJson() {
@@ -226,6 +233,7 @@ public class DashboardServer {
                     "            <table id=\"nodeTable\">\n" +
                     "                <thead>\n" +
                     "                    <tr>\n" +
+                    "                        <th>节点ID</th>\n" +
                     "                        <th>节点地址</th>\n" +
                     "                        <th>剩余空间</th>\n" +
                     "                        <th>最后心跳时间</th>\n" +
@@ -233,7 +241,7 @@ public class DashboardServer {
                     "                    </tr>\n" +
                     "                </thead>\n" +
                     "                <tbody>\n" +
-                    "                    <tr><td colspan=\"4\" style=\"text-align:center;color:#999;\">加载数据中...</td></tr>\n" +
+                    "                    <tr><td colspan=\"5\" style=\"text-align:center;color:#999;\">加载数据中...</td></tr>\n" +
                     "                </tbody>\n" +
                     "            </table>\n" +
                     "        </div>\n" +
@@ -262,7 +270,7 @@ public class DashboardServer {
                     "                    const now = new Date().getTime();\n" +
                     "\n" +
                     "                    if (data.length === 0) {\n" +
-                    "                         tbody.innerHTML = '<tr><td colspan=\"4\" style=\"text-align:center;color:#999;\">暂无节点连接</td></tr>';\n" +
+                    "                         tbody.innerHTML = '<tr><td colspan=\"5\" style=\"text-align:center;color:#999;\">暂无节点连接</td></tr>';\n" +
                     "                    } else {\n" +
                     "                        tbody.innerHTML = '';\n" +
                     "                    }\n" +
@@ -282,6 +290,7 @@ public class DashboardServer {
                     "                            : '<span class=\"status-badge status-offline\">离线</span>';\n" +
                     "                        \n" +
                     "                        tr.innerHTML = `\n" +
+                    "                            <td>${node.nodeId || '-'}</td>\n" +
                     "                            <td>${node.address}</td>\n" +
                     "                            <td>${formatBytes(node.freeSpace)}</td>\n" +
                     "                            <td>${new Date(node.lastHeartbeat).toLocaleString()}</td>\n" +
@@ -308,7 +317,7 @@ public class DashboardServer {
                     "                })\n" +
                     "                .catch(err => {\n" +
                     "                    console.error('Fetch error:', err);\n" +
-                    "                    document.querySelector('#nodeTable tbody').innerHTML = '<tr><td colspan=\"4\" style=\"text-align:center;color:red;\">无法连接到服务器</td></tr>';\n" +
+                    "                    document.querySelector('#nodeTable tbody').innerHTML = '<tr><td colspan=\"5\" style=\"text-align:center;color:red;\">无法连接到服务器</td></tr>';\n" +
                     "                });\n" +
                     "        }\n" +
                     "\n" +

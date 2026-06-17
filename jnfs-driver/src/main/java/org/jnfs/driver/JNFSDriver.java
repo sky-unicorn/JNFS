@@ -256,7 +256,15 @@ public class JNFSDriver {
                         // sendRequestToNameNode 已有空列表 fallback 逻辑可覆盖间隙
                         List<InetSocketAddress> newNodes = new ArrayList<>();
                         for (String node : nodes) {
-                            String[] parts = node.split(":");
+                            // 兼容新旧格式:
+                            // 新格式: nodeId|host:port (由 Registry 返回)
+                            // 旧格式: host:port
+                            String address = node;
+                            if (node.contains("|")) {
+                                String[] nodeParts = node.split("\\|");
+                                address = nodeParts[nodeParts.length - 1];
+                            }
+                            String[] parts = address.split(":");
                             if (parts.length == 2) {
                                 InetSocketAddress addr = new InetSocketAddress(parts[0], Integer.parseInt(parts[1]));
                                 newNodes.add(addr);

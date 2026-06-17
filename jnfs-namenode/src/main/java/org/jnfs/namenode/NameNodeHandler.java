@@ -7,6 +7,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.NettyHandlerHelper;
+import org.jnfs.common.NodeAddressResolver;
 import org.jnfs.common.Packet;
 import org.jnfs.common.SegmentedLocks;
 import org.slf4j.Logger;
@@ -152,7 +153,9 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
         if (entry != null) {
             LOG.info("命中秒传: Hash={}", hash);
-            NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, entry.address.getBytes(StandardCharsets.UTF_8));
+            // entry.address 存储的是 node_id，需要解析为 host:port 返回给客户端
+            String hostPort = NodeAddressResolver.resolve(entry.address);
+            NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, hostPort.getBytes(StandardCharsets.UTF_8));
         } else {
             NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_NOT_EXIST, "Not Found".getBytes(StandardCharsets.UTF_8));
         }
@@ -165,7 +168,9 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             // 1. 查缓存/持久层
             MetadataCacheManager.MetadataEntry entry = cacheManager.get(hash);
             if (entry != null) {
-                NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, entry.address.getBytes(StandardCharsets.UTF_8));
+                // entry.address 存储的是 node_id，需要解析为 host:port 返回给客户端
+                String hostPort = NodeAddressResolver.resolve(entry.address);
+                NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_EXIST, hostPort.getBytes(StandardCharsets.UTF_8));
                 return;
             }
 
@@ -226,7 +231,9 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
         String filename = parts[0];
         String hash = parts[1];
-        String address = parts[2];
+        String hostPort = parts[2];
+        // 将客户端传来的 host:port 转换为 node_id 进行存储
+        String nodeId = NodeAddressResolver.getNodeId(hostPort);
         String storageId;
 
         // 1. 快速检查：如果已存在，直接返回
@@ -254,10 +261,10 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             // 但因为前面已经 cacheManager.get(hash) 判重过了，这里冲突概率很低（除非并发）
             storageId = UUID.randomUUID().toString();
 
-            // 持久化到 MySQL 或 文件，并更新缓存
+            // 持久化到 MySQL 或 文件，并更新缓存 (存储 node_id 而非 host:port)
             try {
                 if (cacheManager != null) {
-                    cacheManager.put(filename, hash, address, storageId);
+                    cacheManager.put(filename, hash, nodeId, storageId);
                 }
             } catch (Exception e) {
                 LOG.error("元数据提交失败: {}", filename, e);
@@ -290,9 +297,11 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         }
 
         MetadataCacheManager.MetadataEntry entry = cacheManager.get(hash);
-        
+
         if (entry != null) {
-            String response = entry.filename + "|" + entry.hash + "|" + entry.address;
+            // entry.address 存储的是 node_id，需要解析为 host:port 返回给客户端
+            String hostPort = NodeAddressResolver.resolve(entry.address);
+            String response = entry.filename + "|" + entry.hash + "|" + hostPort;
             NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, response.getBytes(StandardCharsets.UTF_8));
             return;
         }

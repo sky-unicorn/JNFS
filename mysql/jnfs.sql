@@ -18,18 +18,34 @@ SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 
 -- ----------------------------
+-- Table structure for node_registry
+-- ----------------------------
+DROP TABLE IF EXISTS `node_registry`;
+CREATE TABLE `node_registry`  (
+  `node_id` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '节点唯一标识',
+  `node_type` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '节点类型: DATANODE / NAMENODE',
+  `host` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '节点IP地址',
+  `port` int NOT NULL COMMENT '节点端口',
+  `last_heartbeat` datetime(0) NOT NULL COMMENT '最后心跳时间',
+  `create_time` datetime(0) NULL DEFAULT CURRENT_TIMESTAMP(0),
+  PRIMARY KEY (`node_id`) USING BTREE,
+  INDEX `idx_type`(`node_type`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '节点注册表' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
 -- Table structure for file_location
 -- ----------------------------
 DROP TABLE IF EXISTS `file_location`;
 CREATE TABLE `file_location`  (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `file_hash` char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '关联 file_metadata.file_hash',
-  `datanode_addr` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'DataNode地址 (host:port)',
+  `datanode_id` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'DataNode节点ID (关联 node_registry.node_id)',
+  `datanode_addr` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'DataNode地址 (host:port, 兼容旧数据)',
   `status` tinyint NULL DEFAULT 1 COMMENT '状态: 1-正常, 0-损坏',
   `create_time` datetime(0) NULL DEFAULT CURRENT_TIMESTAMP(0),
   PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE INDEX `uk_hash_node`(`file_hash`, `datanode_addr`) USING BTREE,
-  INDEX `idx_node`(`datanode_addr`) USING BTREE
+  UNIQUE INDEX `uk_hash_node`(`file_hash`, `datanode_id`) USING BTREE,
+  INDEX `idx_node`(`datanode_id`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 3 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '文件存储位置映射表' ROW_FORMAT = Dynamic;
 
 -- ----------------------------

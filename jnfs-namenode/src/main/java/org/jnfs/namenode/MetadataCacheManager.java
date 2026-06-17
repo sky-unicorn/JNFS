@@ -108,6 +108,7 @@ public class MetadataCacheManager {
 
     /**
      * 保存元数据 (Write-Through)
+     * @param address 节点标识（node_id），非 host:port
      */
     public void put(String filename, String hash, String address, String storageId) {
         // 1. 先持久化
@@ -144,7 +145,7 @@ public class MetadataCacheManager {
     public static class MetadataEntry {
         public final String filename;
         public final String hash;
-        public final String address;
+        public final String address;  // 存储 node_id (旧数据兼容时为 host:port)
         public final String storageId;
 
         public MetadataEntry(String filename, String hash, String address, String storageId) {

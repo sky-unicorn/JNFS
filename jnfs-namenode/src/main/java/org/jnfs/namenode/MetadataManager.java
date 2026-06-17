@@ -68,7 +68,8 @@ public class MetadataManager {
         try (BufferedReader reader = new BufferedReader(new FileReader(logFile))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                // 格式: ADD|filename|hash|address|storageId
+                // 新格式: ADD|filename|hash|node_id|storageId
+                // 旧格式: ADD|filename|hash|host:port|storageId (兼容)
                 String[] parts = line.split("\\|");
                 if (parts.length >= 4 && "ADD".equals(parts[0])) {
                     String filename = parts[1];

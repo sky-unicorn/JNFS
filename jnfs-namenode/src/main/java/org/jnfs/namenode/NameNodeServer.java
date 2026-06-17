@@ -19,6 +19,8 @@ import org.jnfs.common.DaemonThreadFactory;
 import org.jnfs.common.HeartbeatSender;
 import org.jnfs.common.NetUtils;
 import org.jnfs.common.NettyServerUtils;
+import org.jnfs.common.NodeAddressResolver;
+import org.jnfs.common.NodeIdManager;
 import org.jnfs.common.Packet;
 import org.jnfs.common.ServerShutdownHelper;
 import org.jnfs.common.SecurityConfig;
@@ -49,6 +51,7 @@ public class NameNodeServer {
 
     private final int port;
     private final String advertisedHost;
+    private final String nodeId;
     // 支持多个注册中心地址
     private final List<InetSocketAddress> registryAddresses;
 
@@ -61,9 +64,10 @@ public class NameNodeServer {
     private final ScheduledExecutorService heartbeatScheduler;
     private final ScheduledExecutorService discoveryScheduler;
 
-    public NameNodeServer(int port, String advertisedHost, List<InetSocketAddress> registryAddresses) {
+    public NameNodeServer(int port, String advertisedHost, String nodeId, List<InetSocketAddress> registryAddresses) {
         this.port = port;
         this.advertisedHost = advertisedHost;
+        this.nodeId = nodeId;
         this.registryAddresses = registryAddresses;
 
         // 初始化共享的 Worker Group
@@ -123,7 +127,8 @@ public class NameNodeServer {
     private void startRegistrationHeartbeatThread() {
         heartbeatScheduler.scheduleAtFixedRate(() -> {
             try {
-                String payload = advertisedHost + ":" + port;
+                // 新格式: node_id|host:port
+                String payload = nodeId + "|" + advertisedHost + ":" + port;
                 HeartbeatSender.broadcastString(LOG, registryPoolMap, registryAddresses,
                         CommandType.REGISTRY_HEARTBEAT_NAMENODE, addr -> payload);
             } catch (Exception e) {
@@ -215,6 +220,10 @@ public class NameNodeServer {
         LOG.info("使用注册中心集群: {}", registryAddresses);
         LOG.info("对外广播地址: {}", advertisedHost);
 
+        // 初始化 node_id (配置指定 > 本地文件 > 自动生成)
+        String nodeId = NodeIdManager.initialize(serverConfig);
+        LOG.info("节点ID: {}", nodeId);
+
         // 加载安全配置
 
         // --- 初始化 MetadataManager ---
@@ -265,7 +274,7 @@ public class NameNodeServer {
         // 注入到 Handler
         NameNodeHandler.initMetadataManager(metadataManager, cacheManager);
 
-        new NameNodeServer(port, advertisedHost, registryAddresses).run();
+        new NameNodeServer(port, advertisedHost, nodeId, registryAddresses).run();
     }
 
     // --- 内部 Discovery Handler ---
@@ -284,7 +293,10 @@ public class NameNodeServer {
                 if (!nodesStr.isEmpty()) {
                     String[] nodes = nodesStr.split(",");
                     LOG.info("更新 DataNode 列表: {}", Arrays.toString(nodes));
-                    NameNodeHandler.initDataNodes(Arrays.asList(nodes));
+                    List<String> nodeList = Arrays.asList(nodes);
+                    NameNodeHandler.initDataNodes(nodeList);
+                    // 更新 NodeAddressResolver 映射
+                    NodeAddressResolver.updateMappingFromDataNodes(nodeList);
                 } else {
                     LOG.info("当前无活跃 DataNode");
                     NameNodeHandler.initDataNodes(null);

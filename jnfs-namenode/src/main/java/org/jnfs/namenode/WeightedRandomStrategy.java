@@ -8,6 +8,11 @@ import java.util.concurrent.ThreadLocalRandom;
  * 基于剩余空间的加权随机策略 (Weighted Random Strategy)
  * 节点被选中的概率与其剩余空间成正比。
  * 解决 "最大空间优先" 策略导致的单点性能瓶颈问题。
+ *
+ * 支持节点列表格式：
+ * - 新格式: node_id|host:port|freeSpace
+ * - 旧格式: host:port|freeSpace
+ * 返回 host:port（客户端无需感知 node_id）
  */
 public class WeightedRandomStrategy implements LoadBalancer {
 
@@ -27,15 +32,24 @@ public class WeightedRandomStrategy implements LoadBalancer {
 
             if (nodeInfo.contains("|")) {
                 String[] parts = nodeInfo.split("\\|");
-                address = parts[0];
-                try {
-                    freeSpace = Long.parseLong(parts[1]);
-                    // 过滤掉空间为负数的异常情况，视为0
-                    if (freeSpace < 0) {
-                        freeSpace = 0;
+                if (parts.length == 3) {
+                    // 新格式: node_id|host:port|freeSpace
+                    address = parts[1];
+                    try {
+                        freeSpace = Long.parseLong(parts[2]);
+                        if (freeSpace < 0) freeSpace = 0;
+                    } catch (NumberFormatException e) {
+                        // ignore
                     }
-                } catch (NumberFormatException e) {
-                    // 解析失败视为0
+                } else {
+                    // 旧格式: host:port|freeSpace
+                    address = parts[0];
+                    try {
+                        freeSpace = Long.parseLong(parts[1]);
+                        if (freeSpace < 0) freeSpace = 0;
+                    } catch (NumberFormatException e) {
+                        // ignore
+                    }
                 }
             } else {
                 address = nodeInfo;
@@ -49,8 +63,8 @@ public class WeightedRandomStrategy implements LoadBalancer {
         // 2. 如果总空间为0（所有节点都满了或没有信息），退化为纯随机选择
         if (totalFreeSpace <= 0) {
             int randomIndex = ThreadLocalRandom.current().nextInt(nodes.size());
-            String randomNode = nodes.get(randomIndex);
-            return randomNode.split("\\|")[0];
+            String[] parts = nodes.get(randomIndex).split("\\|");
+            return parts.length == 3 ? parts[1] : parts[0];
         }
 
         // 3. 加权随机选择
