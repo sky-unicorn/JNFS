@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * NameNode 业务处理器
@@ -67,10 +68,13 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     // 分段锁 (使用通用工具类)
     private static final SegmentedLocks LOCKS = new SegmentedLocks(128);
 
+    // File 模式: node_id 回填是否已执行过 (仅执行一次)
+    private static final AtomicBoolean nodeIdBackfillDone = new AtomicBoolean(false);
+
     /**
      * 初始化元数据管理器 (由 NameNodeServer 启动时调用)
      */
-    public static void initMetadataManager(MetadataManager manager, MetadataCacheManager cache) {
+    public static void initMetadataManager(MetadataManager manager, MetadataCacheManager cache) throws java.io.IOException {
         metadataManager = manager;
         cacheManager = cache;
         
@@ -112,6 +116,19 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             // 生成新列表并设为不可变，替换引用 (Atomic Snapshot)
             List<String> snapshot = new ArrayList<>(nodes);
             dataNodes = Collections.unmodifiableList(snapshot);
+        }
+
+        // §4.9.4: File 模式下，首次从 Registry 拿到 DataNode 列表后，
+        // 利用 host:port -> node_id 映射在线回填 namenode_meta.log
+        if (metadataManager != null && nodes != null && !nodes.isEmpty()
+                && nodeIdBackfillDone.compareAndSet(false, true)) {
+            if (metadataManager instanceof MySQLMetadataManager) {
+                // MySQL 模式: §4.9.2 在线补全 file_location.dentanode_id
+                ((MySQLMetadataManager) metadataManager).backfillDataNodeIds();
+            } else {
+                // File 模式: §4.9.4 在线回填 namenode_meta.log 中的 host:port
+                metadataManager.backfillNodeIds();
+            }
         }
     }
 

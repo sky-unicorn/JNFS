@@ -22,3 +22,11 @@ out/artifacts/JNFS_jar/JNFS.jar
 cp.txt
 namenode_meta.log
 logs/*
+
+# 运行时生成的节点身份文件
+node_id.dat
+meta_version
+meta_version.tmp
+
+# Claude Code 本地配置
+.claude/

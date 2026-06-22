@@ -1,5 +1,6 @@
 package org.jnfs.namenode;
 
+import java.io.File;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -25,6 +26,9 @@ import org.jnfs.common.NodeIdManager;
 import org.jnfs.common.Packet;
 import org.jnfs.common.ServerShutdownHelper;
 import org.jnfs.common.SecurityConfig;
+import org.jnfs.common.migration.MigrationResult;
+import org.jnfs.common.migration.MigrationRunner;
+import org.jnfs.common.migration.StorageMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -231,6 +235,9 @@ public class NameNodeServer {
 
         // 加载安全配置
 
+        // --- 数据迁移（必须在初始化业务组件之前执行） ---
+        File dataDir = new File(System.getProperty("APP_HOME", System.getProperty("user.dir")));
+
         // --- 初始化 MetadataManager ---
         MetadataManager metadataManager = null;
 
@@ -241,6 +248,7 @@ public class NameNodeServer {
         if (config.containsKey("metadata")) {
             Map<String, Object> metaConfig = (Map<String, Object>) config.get("metadata");
             String mode = (String) metaConfig.getOrDefault("mode", "file");
+            StorageMode storageMode = StorageMode.fromConfig(mode);
 
             // 读取缓存配置
             if (metaConfig.containsKey("cache")) {
@@ -263,21 +271,67 @@ public class NameNodeServer {
                 String user = (String) mysqlConfig.getOrDefault("user", "root");
                 String password = (String) mysqlConfig.getOrDefault("password", "");
 
+                // 先运行迁移（必须在初始化 MetadataManager 之前）
+                com.zaxxer.hikari.HikariDataSource migrationDs = null;
+                try {
+                    com.zaxxer.hikari.HikariConfig hikariConfig = new com.zaxxer.hikari.HikariConfig();
+                    hikariConfig.setJdbcUrl("jdbc:mysql://" + dbHost + ":" + dbPort + "/" + dbName
+                            + "?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true");
+                    hikariConfig.setUsername(user);
+                    hikariConfig.setPassword(password);
+                    hikariConfig.setMaximumPoolSize(2);
+                    migrationDs = new com.zaxxer.hikari.HikariDataSource(hikariConfig);
+
+                    MigrationResult migrationResult = MigrationRunner.run(storageMode, null, migrationDs);
+                    if (migrationResult.isFailed()) {
+                        LOG.error("数据迁移失败，拒绝启动。原因: {}", migrationResult.getMessage());
+                        System.exit(2);
+                    }
+                    LOG.info("数据迁移: {}", migrationResult.getMessage());
+                } finally {
+                    if (migrationDs != null) {
+                        migrationDs.close();
+                    }
+                }
+
                 metadataManager = new MySQLMetadataManager(dbHost, dbPort, dbName, user, password);
             } else {
                 LOG.info("使用本地文件元数据存储");
+
+                // 运行迁移（在创建 MetadataManager 之前，因为迁移会修改日志文件）
+                MigrationResult migrationResult = MigrationRunner.run(storageMode, dataDir, null);
+                if (migrationResult.isFailed()) {
+                    LOG.error("数据迁移失败，拒绝启动。原因: {}", migrationResult.getMessage());
+                    System.exit(2);
+                }
+                LOG.info("数据迁移: {}", migrationResult.getMessage());
+
                 metadataManager = new MetadataManager();
             }
         } else {
             LOG.info("默认使用本地文件元数据存储");
+
+            // 运行迁移
+            MigrationResult migrationResult = MigrationRunner.run(StorageMode.FILE, dataDir, null);
+            if (migrationResult.isFailed()) {
+                LOG.error("数据迁移失败，拒绝启动。原因: {}", migrationResult.getMessage());
+                System.exit(2);
+            }
+            LOG.info("数据迁移: {}", migrationResult.getMessage());
+
             metadataManager = new MetadataManager();
         }
 
         // --- 初始化 MetadataCacheManager ---
         MetadataCacheManager cacheManager = new MetadataCacheManager(metadataManager, cacheEnabled, cacheMaxSize);
 
-        // 注入到 Handler
-        NameNodeHandler.initMetadataManager(metadataManager, cacheManager);
+        // 注入到 Handler (recover 可能因日志损坏抛 IOException，拒绝启动)
+        try {
+            NameNodeHandler.initMetadataManager(metadataManager, cacheManager);
+        } catch (Exception e) {
+            LOG.error("元数据恢复失败，拒绝启动。原因: {}", e.getMessage());
+            System.exit(2);
+        }
 
         new NameNodeServer(port, advertisedHost, nodeId, registryAddresses).run();
     }

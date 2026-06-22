@@ -114,6 +114,16 @@ public final class NodeAddressResolver {
     }
 
     /**
+     * 获取 host:port -> node_id 映射快照（只读）
+     * 供 MySQL 模式的 node_id 在线补全使用 (§4.9.2)
+     *
+     * @return 不可修改的映射快照
+     */
+    public static Map<String, String> getAddressToNodeIdSnapshot() {
+        return addressToNodeId;
+    }
+
+    /**
      * 判断字符串是否为 host:port 格式
      * 规则：包含冒号，冒号后为数字（端口）
      *

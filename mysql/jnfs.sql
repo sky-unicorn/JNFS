@@ -18,6 +18,16 @@ SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 
 -- ----------------------------
+-- Table structure for schema_version
+-- ----------------------------
+DROP TABLE IF EXISTS `schema_version`;
+CREATE TABLE `schema_version` (
+  `version` int NOT NULL COMMENT '当前 schema 版本',
+  `upgraded_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '升级时间',
+  PRIMARY KEY (`version`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='schema 版本记录';
+
+-- ----------------------------
 -- Table structure for node_registry
 -- ----------------------------
 DROP TABLE IF EXISTS `node_registry`;

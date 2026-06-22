@@ -23,15 +23,14 @@ public class MySQLMetadataManager extends MetadataManager {
     private final HikariDataSource dataSource;
 
     public MySQLMetadataManager(String host, int port, String dbName, String user, String password) {
-        HikariConfig config = new HikariConfig();
-        config.setJdbcUrl("jdbc:mysql://" + host + ":" + port + "/" + dbName + "?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true");
-        config.setUsername(user);
-        config.setPassword(password);
-        config.addDataSourceProperty("cachePrepStmts", "true");
-        config.addDataSourceProperty("prepStmtCacheSize", "250");
-        config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
-        
-        this.dataSource = new HikariDataSource(config);
+        this(createDataSource(host, port, dbName, user, password));
+    }
+
+    /**
+     * 使用已有的 DataSource 构造（迁移流程中先创建 DataSource，再传入）
+     */
+    public MySQLMetadataManager(HikariDataSource dataSource) {
+        this.dataSource = dataSource;
         
         // 确保表存在 (简单起见，生产环境建议手动创建)
         try (Connection conn = dataSource.getConnection()) {
@@ -83,6 +82,24 @@ public class MySQLMetadataManager extends MetadataManager {
         } catch (SQLException e) {
             LOG.error("创建数据库表失败", e);
         }
+    }
+
+    private static HikariDataSource createDataSource(String host, int port, String dbName, String user, String password) {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl("jdbc:mysql://" + host + ":" + port + "/" + dbName + "?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true");
+        config.setUsername(user);
+        config.setPassword(password);
+        config.addDataSourceProperty("cachePrepStmts", "true");
+        config.addDataSourceProperty("prepStmtCacheSize", "250");
+        config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
+        return new HikariDataSource(config);
+    }
+
+    /**
+     * 获取内部 DataSource（供迁移流程复用）
+     */
+    public HikariDataSource getDataSource() {
+        return dataSource;
     }
 
     @Override
@@ -272,5 +289,69 @@ public class MySQLMetadataManager extends MetadataManager {
             LOG.error("[MySQLMetadataManager] 写入数据库失败", e);
             throw new java.io.IOException("Database persistence failed", e);
         }
+    }
+
+    /**
+     * MySQL 模式: 在线补全 file_location.datanode_id
+     * 对应设计文档 §4.9.2
+     * <p>
+     * 语义正确性：NameNode 从 Registry 拉取的 DataNode 列表 (node_id|host:port|freeSpace)
+     * 证明了"该 node_id 现在就是这个 host:port"。因此 file_location 中所有
+     * datanode_addr = 这个 host:port 且 datanode_id IS NULL 的记录,补上 node_id 是正确的。
+     * <p>
+     * IP 变更场景：
+     * - DataNode 换 IP 后重启(同 node_id) → 新 IP 心跳补齐 datanode_addr=新IP 的记录
+     * - 老节点永久下线,新机器接管同 IP → 新机器首次心跳用自己的新 node_id 补齐历史记录
+     *
+     * @return 被补全的记录数, -1 表示出错
+     */
+    public int backfillDataNodeIds() {
+        // 从 NodeAddressResolver 拿当前 host:port -> node_id 映射
+        java.util.Map<String, String> addrToId = org.jnfs.common.NodeAddressResolver.getAddressToNodeIdSnapshot();
+        if (addrToId.isEmpty()) {
+            LOG.info("[MySQLMetadataManager] 当前无 host:port→node_id 映射,跳过在线补全");
+            return 0;
+        }
+
+        String sql = "UPDATE file_location SET datanode_id = ? "
+                + "WHERE datanode_addr = ? AND datanode_id IS NULL";
+        int totalUpdated = 0;
+
+        try (Connection conn = dataSource.getConnection()) {
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                for (Map.Entry<String, String> entry : addrToId.entrySet()) {
+                    String address = entry.getKey();
+                    String nodeId = entry.getValue();
+                    // 跳过 address == nodeId 的情况(老数据 fallback)
+                    if (address.equals(nodeId)) {
+                        continue;
+                    }
+                    stmt.setString(1, nodeId);
+                    stmt.setString(2, address);
+                    int updated = stmt.executeUpdate();
+                    if (updated > 0) {
+                        LOG.info("[MySQLMetadataManager] 补全 datanode_addr={} → datanode_id={} ({} 条)",
+                                address, nodeId, updated);
+                        totalUpdated += updated;
+                    }
+                }
+            }
+
+            // 补全进度监控:剩余未补全的记录数
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "SELECT COUNT(*) FROM file_location WHERE datanode_id IS NULL");
+                 ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    int remaining = rs.getInt(1);
+                    LOG.info("[MySQLMetadataManager] 在线补全完成: 本次补全 {} 条,剩余未补全 {} 条",
+                            totalUpdated, remaining);
+                }
+            }
+        } catch (SQLException e) {
+            LOG.error("[MySQLMetadataManager] 在线补全 datanode_id 失败", e);
+            return -1;
+        }
+
+        return totalUpdated;
     }
 }
