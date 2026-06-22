@@ -3,6 +3,7 @@ package org.jnfs.registry;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.jnfs.common.AppHomeInitializer;
 import org.jnfs.common.ConfigUtil;
 import org.jnfs.common.NettyServerUtils;
 import org.slf4j.Logger;
@@ -15,6 +16,10 @@ import org.slf4j.LoggerFactory;
  * 升级：集成 Dashboard HTTP 服务
  */
 public class RegistryServer {
+
+    static {
+        AppHomeInitializer.init();
+    }
 
     private static final Logger LOG = LoggerFactory.getLogger(RegistryServer.class);
 

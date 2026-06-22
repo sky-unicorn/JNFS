@@ -11,6 +11,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.jnfs.common.AppHomeInitializer;
 import org.jnfs.common.ChannelPoolUtils;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.ConfigUtil;
@@ -46,6 +47,10 @@ import io.netty.util.concurrent.Future;
  * 优化：使用连接池复用 Registry 连接 (方案 B)
  */
 public class NameNodeServer {
+
+    static {
+        AppHomeInitializer.init();
+    }
 
     private static final Logger LOG = LoggerFactory.getLogger(NameNodeServer.class);
 
