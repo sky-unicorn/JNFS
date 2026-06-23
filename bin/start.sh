@@ -10,9 +10,9 @@ SERVICE=$1
 
 if [ -z "$SERVICE" ]; then
     echo "Starting all services..."
-    "$0" registry
-    "$0" namenode
-    "$0" datanode
+    "$DIR/start.sh" registry
+    "$DIR/start.sh" namenode
+    "$DIR/start.sh" datanode
     exit 0
 fi
 
