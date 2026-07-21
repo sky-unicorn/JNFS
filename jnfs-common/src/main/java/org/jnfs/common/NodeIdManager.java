@@ -70,7 +70,7 @@ public final class NodeIdManager {
      * 从本地文件加载 node_id
      */
     private static String loadNodeIdFromFile() {
-        File file = new File(NODE_ID_FILE);
+        File file = DataDirResolver.resolve(NODE_ID_FILE);
         if (!file.exists()) {
             return null;
         }
@@ -89,7 +89,7 @@ public final class NodeIdManager {
      * 将 node_id 持久化到本地文件
      */
     private static void saveNodeIdToFile(String nodeId) {
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(NODE_ID_FILE))) {
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(DataDirResolver.resolve(NODE_ID_FILE)))) {
             writer.write(nodeId);
             writer.newLine();
             writer.flush();

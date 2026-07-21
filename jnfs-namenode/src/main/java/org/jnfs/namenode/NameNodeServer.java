@@ -18,6 +18,7 @@ import org.jnfs.common.CommandType;
 import org.jnfs.common.ConfigUtil;
 import org.jnfs.common.Constants;
 import org.jnfs.common.DaemonThreadFactory;
+import org.jnfs.common.DataDirResolver;
 import org.jnfs.common.HeartbeatSender;
 import org.jnfs.common.NetUtils;
 import org.jnfs.common.NettyServerUtils;
@@ -236,7 +237,7 @@ public class NameNodeServer {
         // 加载安全配置
 
         // --- 数据迁移（必须在初始化业务组件之前执行） ---
-        File dataDir = new File(System.getProperty("APP_HOME", System.getProperty("user.dir")));
+        File dataDir = DataDirResolver.dataDir();
 
         // --- 初始化 MetadataManager ---
         MetadataManager metadataManager = null;
@@ -353,9 +354,11 @@ public class NameNodeServer {
                     String[] nodes = nodesStr.split(",");
                     LOG.info("更新 DataNode 列表: {}", Arrays.toString(nodes));
                     List<String> nodeList = Arrays.asList(nodes);
-                    NameNodeHandler.initDataNodes(nodeList);
-                    // 更新 NodeAddressResolver 映射
+                    // 必须先更新 NodeAddressResolver 映射：
+                    // initDataNodes 首次调用会同步触发 backfillNodeIds()，
+                    // 若映射尚未建立，host:port 无法解析为 node_id，回填将为 0 行
                     NodeAddressResolver.updateMappingFromDataNodes(nodeList);
+                    NameNodeHandler.initDataNodes(nodeList);
                 } else {
                     LOG.info("当前无活跃 DataNode");
                     NameNodeHandler.initDataNodes(null);

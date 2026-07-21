@@ -56,6 +56,8 @@ fi
 
 # Run Java program
 # Note: Linux classpath separator is :
+# Pin cwd to APP_HOME so relative data paths (namenode_meta.log, node_id.dat) resolve there
+cd "$APP_HOME"
 nohup java -DAPP_HOME="$APP_HOME" -Dlogback.configurationFile="$CONF_DIR/logback-${SERVICE}.xml" -cp "$CONF_DIR:$LIB_DIR/*" "$MAIN_CLASS" > /dev/null 2>&1 &
 PID=$!
 echo "$PID" > "$PID_FILE"

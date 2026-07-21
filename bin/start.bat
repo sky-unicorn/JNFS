@@ -2,6 +2,8 @@
 setlocal
 
 set "APP_HOME=%~dp0.."
+rem Normalize APP_HOME to an absolute path (resolves the trailing .. so logs are clean)
+for %%I in ("%APP_HOME%") do set "APP_HOME=%%~fI"
 set "CONF_DIR=%APP_HOME%\conf"
 set "LIB_DIR=%APP_HOME%\lib"
 set "PID_DIR=%APP_HOME%\pids"
@@ -51,7 +53,8 @@ if exist "%PID_FILE%" (
 
 rem Launch java in a new console window and capture its PID via PowerShell
 rem Using -ArgumentList array avoids embedded quote issues with paths containing spaces
-powershell -NoProfile -Command "$jvmArgs = @('-DAPP_HOME=%APP_HOME%','-Dlogback.configurationFile=%CONF_DIR%\logback-%SERVICE%.xml','-cp','%CONF_DIR%;%LIB_DIR%\*','%MAIN_CLASS%'); $p = Start-Process -FilePath java -ArgumentList $jvmArgs -PassThru; $p.Id | Out-File -FilePath '%PID_FILE%' -Encoding ascii -NoNewline"
+rem -WorkingDirectory pins the JVM cwd to APP_HOME so relative paths resolve there
+powershell -NoProfile -Command "$jvmArgs = @('-DAPP_HOME=%APP_HOME%','-Dlogback.configurationFile=%CONF_DIR%\logback-%SERVICE%.xml','-cp','%CONF_DIR%;%LIB_DIR%\*','%MAIN_CLASS%'); $p = Start-Process -FilePath java -ArgumentList $jvmArgs -WorkingDirectory '%APP_HOME%' -PassThru; $p.Id | Out-File -FilePath '%PID_FILE%' -Encoding ascii -NoNewline"
 
 rem Verify PID file was written
 if not exist "%PID_FILE%" (

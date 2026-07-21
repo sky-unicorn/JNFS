@@ -1,10 +1,13 @@
 package org.jnfs.namenode;
 
+import org.jnfs.common.DataDirResolver;
 import org.jnfs.common.NodeAddressResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.Map;
 import java.util.Set;
 
@@ -20,7 +23,7 @@ public class MetadataManager {
     private final File logFile;
 
     public MetadataManager() {
-        this.logFile = new File(METADATA_FILE);
+        this.logFile = DataDirResolver.resolve(METADATA_FILE);
     }
 
     /**
@@ -155,6 +158,8 @@ public class MetadataManager {
         int totalLines = 0;
         File tmpFile = new File(logFile.getAbsolutePath() + ".tmp");
 
+        // 注意：rename 必须在 reader/writer 句柄关闭后执行。
+        // Windows 下被占用文件无法重命名，故把重命名放在 try-with-resources 块外。
         try (BufferedReader reader = new BufferedReader(new FileReader(logFile));
              BufferedWriter writer = new BufferedWriter(new FileWriter(tmpFile))) {
 
@@ -185,15 +190,21 @@ public class MetadataManager {
             }
             writer.flush();
 
-            // 原子替换
-            if (!tmpFile.renameTo(logFile)) {
-                LOG.error("[MetadataManager] node_id 回填失败: 无法重命名临时文件");
-                tmpFile.delete();
-                return 0;
-            }
-
         } catch (IOException e) {
             LOG.error("[MetadataManager] node_id 回填失败", e);
+            tmpFile.delete();
+            return 0;
+        }
+
+        // 句柄已关闭，执行原子替换
+        try {
+            if (!tmpFile.renameTo(logFile)) {
+                Files.move(tmpFile.toPath(), logFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE);
+            }
+        } catch (IOException e) {
+            LOG.error("[MetadataManager] node_id 回填失败: 无法重命名临时文件: {}", e.getMessage());
             tmpFile.delete();
             return 0;
         }
