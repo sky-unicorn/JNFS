@@ -5,6 +5,7 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 APP_HOME="$(dirname "$DIR")"
 CONF_DIR="$APP_HOME/conf"
 LIB_DIR="$APP_HOME/lib"
+PID_DIR="$APP_HOME/pids"
 
 SERVICE=$1
 
@@ -37,7 +38,25 @@ if [ ! -d "$LIB_DIR" ]; then
     exit 1
 fi
 
+# Create pids directory
+mkdir -p "$PID_DIR"
+PID_FILE="$PID_DIR/$SERVICE.pid"
+
+# Check if already running
+if [ -f "$PID_FILE" ]; then
+    EXISTING_PID=$(cat "$PID_FILE")
+    if kill -0 "$EXISTING_PID" 2>/dev/null; then
+        echo "Error: $SERVICE is already running with PID $EXISTING_PID"
+        exit 1
+    else
+        echo "Warning: stale PID file detected, removing $PID_FILE"
+        rm -f "$PID_FILE"
+    fi
+fi
+
 # Run Java program
 # Note: Linux classpath separator is :
 nohup java -DAPP_HOME="$APP_HOME" -Dlogback.configurationFile="$CONF_DIR/logback-${SERVICE}.xml" -cp "$CONF_DIR:$LIB_DIR/*" "$MAIN_CLASS" > /dev/null 2>&1 &
-echo "$SERVICE started with PID $!"
+PID=$!
+echo "$PID" > "$PID_FILE"
+echo "$SERVICE started with PID $PID"

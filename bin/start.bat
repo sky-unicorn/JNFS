@@ -4,6 +4,7 @@ setlocal
 set "APP_HOME=%~dp0.."
 set "CONF_DIR=%APP_HOME%\conf"
 set "LIB_DIR=%APP_HOME%\lib"
+set "PID_DIR=%APP_HOME%\pids"
 
 rem Service selection: registry, namenode, datanode
 set SERVICE=%1
@@ -29,6 +30,36 @@ if "%SERVICE%"=="registry" (
 )
 
 echo Starting %SERVICE%...
-start "JNFS %SERVICE%" cmd /k java -DAPP_HOME="%APP_HOME%" -Dlogback.configurationFile="%CONF_DIR%\logback-%SERVICE%.xml" -cp "%CONF_DIR%;%LIB_DIR%\*" %MAIN_CLASS%
+
+rem Create pids directory
+if not exist "%PID_DIR%" mkdir "%PID_DIR%"
+
+set "PID_FILE=%PID_DIR%\%SERVICE%.pid"
+
+rem Check if already running
+if exist "%PID_FILE%" (
+    set /p EXISTING_PID=<"%PID_FILE%"
+    tasklist /fi "PID eq %EXISTING_PID%" /fo csv /nh 2>nul | findstr /i "%EXISTING_PID%" >nul
+    if not errorlevel 1 (
+        echo Error: %SERVICE% is already running with PID %EXISTING_PID%
+        goto :eof
+    ) else (
+        echo Warning: stale PID file detected, removing %PID_FILE%
+        del "%PID_FILE%"
+    )
+)
+
+rem Launch java in a new console window and capture its PID via PowerShell
+rem Using -ArgumentList array avoids embedded quote issues with paths containing spaces
+powershell -NoProfile -Command "$jvmArgs = @('-DAPP_HOME=%APP_HOME%','-Dlogback.configurationFile=%CONF_DIR%\logback-%SERVICE%.xml','-cp','%CONF_DIR%;%LIB_DIR%\*','%MAIN_CLASS%'); $p = Start-Process -FilePath java -ArgumentList $jvmArgs -PassThru; $p.Id | Out-File -FilePath '%PID_FILE%' -Encoding ascii -NoNewline"
+
+rem Verify PID file was written
+if not exist "%PID_FILE%" (
+    echo Error: failed to start %SERVICE% ^(PID file not created^)
+    goto :eof
+)
+
+set /p STARTED_PID=<"%PID_FILE%"
+echo %SERVICE% started with PID %STARTED_PID%
 
 endlocal

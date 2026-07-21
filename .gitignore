@@ -23,6 +23,9 @@ cp.txt
 namenode_meta.log
 logs/*
 
+# PID 文件（运行时生成）
+pids/
+
 # 运行时生成的节点身份文件
 node_id.dat
 meta_version
