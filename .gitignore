@@ -32,5 +32,7 @@ meta_version
 meta_version.tmp
 
 # Claude Code 本地配置（保留 rules 进仓库供 CLAUDE.md 引用）
-.claude/**
+.claude/*
 CLAUDE.md
+docs/design/upgrade-migration-architecture.md
+dashboard_users.properties

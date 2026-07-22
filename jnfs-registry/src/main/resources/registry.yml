@@ -9,6 +9,34 @@ dashboard:
   # 访问地址: http://localhost:15367
   port: 15367
 
+  # --- 登录鉴权配置 ---
+  auth:
+    # 是否启用登录鉴权（false 则跳过所有鉴权，保留旧的无登录行为）
+    enabled: true
+
+    # 用户存储模式：file 或 mysql
+    storage:
+      mode: file                  # file | mysql
+
+      # MySQL 连接配置（当 mode: mysql 时生效）
+      # 建议使用独立数据库（如 jnfs_registry），避免与 NameNode 元数据表混淆
+      mysql:
+        host: localhost
+        port: 3306
+        database: jnfs_registry
+        user: jnfs
+        password: ""              # 建议通过外部 conf/registry.yml 配置，勿提交明文
+
+    # 初始管理员账号（仅在首次启动且存储中无用户时使用，创建后建议清空 password）
+    # 密码也可通过环境变量 JNFS_DASHBOARD_ADMIN_PASSWORD 提供（配置优先）
+    initial-admin:
+      username: admin
+      password: admin                # 留空则回退环境变量 JNFS_DASHBOARD_ADMIN_PASSWORD；两者均空则拒绝启动
+
+    # Session 超时时间（秒），默认 2 小时
+    session:
+      timeout-seconds: 7200
+
 # --- 心跳检测配置 ---
 heartbeat:
   # 节点心跳超时时间 (单位: 毫秒)

@@ -15,6 +15,16 @@
             <groupId>org.jnfs</groupId>
             <artifactId>jnfs-common</artifactId>
         </dependency>
+        <!-- Dashboard 登录鉴权：mysql 存储模式所需（版本由父 pom dependencyManagement 管理）。
+             hutool（含 cn.hutool.crypto.digest.BCrypt）经 jnfs-common 传递引入，无需在此声明。 -->
+        <dependency>
+            <groupId>mysql</groupId>
+            <artifactId>mysql-connector-java</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>

@@ -94,4 +94,20 @@ CREATE TABLE `file_upload_lock` (
 -- Records of file_metadata
 -- ----------------------------
 
+-- ----------------------------
+-- Registry Dashboard 鉴权用户表
+-- 说明：此表由 Registry 进程的 Dashboard 登录功能使用，与 NameNode 元数据表物理隔离、无外键依赖。
+--       默认建议建在独立数据库 jnfs_registry（见 registry.yml: dashboard.auth.storage.mysql.database）；
+--       若与 NameNode 共用同一数据库，可直接执行下方 DDL。
+--       password_hash 仅存 BCrypt 哈希（$2a$...），绝不存明文。
+-- ----------------------------
+DROP TABLE IF EXISTS `dashboard_user`;
+CREATE TABLE `dashboard_user` (
+  `username` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '用户名',
+  `password_hash` varchar(72) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT 'BCrypt 密码哈希',
+  `create_time` datetime(0) NULL DEFAULT CURRENT_TIMESTAMP(0),
+  `update_time` datetime(0) NULL DEFAULT CURRENT_TIMESTAMP(0) ON UPDATE CURRENT_TIMESTAMP(0),
+  PRIMARY KEY (`username`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = 'Dashboard 登录用户表' ROW_FORMAT = Dynamic;
+
 SET FOREIGN_KEY_CHECKS = 1;

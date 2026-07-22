@@ -1,34 +1,63 @@
 package org.jnfs.registry;
 
+import com.sun.net.httpserver.HttpContext;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
 import org.jnfs.common.SecurityConfig;
+import org.jnfs.registry.auth.AuthFilter;
+import org.jnfs.registry.auth.AuthManager;
+import org.jnfs.registry.auth.ChangePasswordHandler;
+import org.jnfs.registry.auth.LoginHandler;
+import org.jnfs.registry.auth.LogoutHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
  * 仪表盘服务 (HTTP Server)
  * 提供系统状态的 Web 界面和 JSON API
+ * <p>
+ * 可选启用登录鉴权：当传入非 null 的 {@link AuthManager} 时，
+ * 受保护路由（/、/api/nodes、/api/security、/api/change-password）挂载 AuthFilter，
+ * 未登录访问将 302 跳转 /login；传入 null 则保留旧的无鉴权行为。
  */
 public class DashboardServer {
 
     private static final Logger LOG = LoggerFactory.getLogger(DashboardServer.class);
 
     private final int port;
-    private com.sun.net.httpserver.HttpServer server;
+    /** 鉴权管理器，null 表示关闭鉴权（保留旧行为） */
+    private final AuthManager authManager;
+
+    private HttpServer server;
 
     public DashboardServer(int port) {
+        this(port, null);
+    }
+
+    public DashboardServer(int port, AuthManager authManager) {
         this.port = port;
+        this.authManager = authManager;
     }
 
     public void start() {
         try {
-            server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress(port), 0);
+            server = HttpServer.create(new InetSocketAddress(port), 0);
 
-            server.createContext("/", new DashboardHttpHandler());
+            AuthFilter authFilter = (authManager != null) ? new AuthFilter(authManager) : null;
 
-            server.createContext("/api/nodes", exchange -> {
+            if (authManager != null) {
+                // 公开路由（不加 filter）
+                server.createContext("/login", new LoginHandler(authManager));
+                server.createContext("/logout", new LogoutHandler(authManager));
+            }
+
+            // 受保护路由（鉴权启用时挂 filter）
+            addProtected("/", new DashboardHttpHandler(), authFilter);
+            addProtected("/api/nodes", exchange -> {
                 String json = getNodesJson();
                 byte[] response = json.getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
@@ -36,9 +65,8 @@ public class DashboardServer {
                 try (java.io.OutputStream os = exchange.getResponseBody()) {
                     os.write(response);
                 }
-            });
-
-            server.createContext("/api/security", exchange -> {
+            }, authFilter);
+            addProtected("/api/security", exchange -> {
                 String json = getSecurityJson();
                 byte[] response = json.getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().set("Content-Type", "application/json; charset=UTF-8");
@@ -46,13 +74,25 @@ public class DashboardServer {
                 try (java.io.OutputStream os = exchange.getResponseBody()) {
                     os.write(response);
                 }
-            });
+            }, authFilter);
+            addProtected("/api/change-password", new ChangePasswordHandler(authManager), authFilter);
 
             server.setExecutor(null);
             server.start();
-            LOG.info("JNFS Dashboard 启动成功，访问地址: http://localhost:{}", port);
+            LOG.info("JNFS Dashboard 启动成功，访问地址: http://localhost:{}{}",
+                    port, authManager != null ? "（已启用登录鉴权）" : "（鉴权已禁用）");
         } catch (Exception e) {
             LOG.error("Dashboard启动失败", e);
+        }
+    }
+
+    /**
+     * 注册受保护路由：鉴权启用时挂 AuthFilter
+     */
+    private void addProtected(String path, HttpHandler handler, AuthFilter filter) {
+        HttpContext ctx = server.createContext(path, handler);
+        if (filter != null) {
+            ctx.getFilters().add(filter);
         }
     }
 
@@ -98,11 +138,22 @@ public class DashboardServer {
         return "{\"securityConfigured\":" + customConfigured + "}";
     }
 
-    static class DashboardHttpHandler implements com.sun.net.httpserver.HttpHandler {
+    class DashboardHttpHandler implements HttpHandler {
         @Override
         public void handle(com.sun.net.httpserver.HttpExchange exchange) throws java.io.IOException {
-            // 美化后的 HTML 模板
-            String html = "<!DOCTYPE html>\n" +
+            String html = buildHtml();
+            byte[] response = html.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8");
+            exchange.sendResponseHeaders(200, response.length);
+            try (java.io.OutputStream os = exchange.getResponseBody()) {
+                os.write(response);
+            }
+        }
+
+        private String buildHtml() {
+            // 鉴权是否启用（由外部类 authManager 决定）
+            boolean authEnabled = authManager != null;
+            return "<!DOCTYPE html>\n" +
                     "<html lang=\"zh-CN\">\n" +
                     "<head>\n" +
                     "    <meta charset=\"UTF-8\">\n" +
@@ -127,10 +178,32 @@ public class DashboardServer {
                     "            color: white;\n" +
                     "            padding: 1rem 2rem;\n" +
                     "            box-shadow: 0 2px 4px rgba(0,0,0,0.1);\n" +
+                    "            display: flex;\n" +
+                    "            justify-content: space-between;\n" +
+                    "            align-items: center;\n" +
                     "        }\n" +
                     "        .header h1 {\n" +
                     "            margin: 0;\n" +
                     "            font-size: 1.5rem;\n" +
+                    "        }\n" +
+                    "        .header-actions {\n" +
+                    "            display: flex;\n" +
+                    "            gap: 0.75rem;\n" +
+                    "            align-items: center;\n" +
+                    "        }\n" +
+                    "        .header-actions button, .header-actions a {\n" +
+                    "            background: rgba(255,255,255,0.2);\n" +
+                    "            color: white;\n" +
+                    "            border: 1px solid rgba(255,255,255,0.4);\n" +
+                    "            padding: 0.4rem 0.9rem;\n" +
+                    "            border-radius: 4px;\n" +
+                    "            cursor: pointer;\n" +
+                    "            font-size: 0.85rem;\n" +
+                    "            text-decoration: none;\n" +
+                    "            transition: background 0.2s;\n" +
+                    "        }\n" +
+                    "        .header-actions button:hover, .header-actions a:hover {\n" +
+                    "            background: rgba(255,255,255,0.35);\n" +
                     "        }\n" +
                     "        .container {\n" +
                     "            max-width: 1200px;\n" +
@@ -207,11 +280,40 @@ public class DashboardServer {
                     "            font-size: 0.8rem;\n" +
                     "            margin-top: 0.5rem;\n" +
                     "        }\n" +
+                    "        /* 修改密码弹窗 */\n" +
+                    "        .modal-overlay {\n" +
+                    "            display: none;\n" +
+                    "            position: fixed; top: 0; left: 0; right: 0; bottom: 0;\n" +
+                    "            background: rgba(0,0,0,0.5);\n" +
+                    "            justify-content: center; align-items: center;\n" +
+                    "            z-index: 100;\n" +
+                    "        }\n" +
+                    "        .modal-overlay.show { display: flex; }\n" +
+                    "        .modal {\n" +
+                    "            background: #fff; padding: 1.5rem; border-radius: 8px;\n" +
+                    "            width: 100%; max-width: 380px;\n" +
+                    "        }\n" +
+                    "        .modal h2 { margin: 0 0 1rem 0; font-size: 1.1rem; color: #2c3e50; }\n" +
+                    "        .modal input {\n" +
+                    "            width: 100%; padding: 0.6rem; margin-bottom: 0.75rem;\n" +
+                    "            border: 1px solid #ddd; border-radius: 4px; font-size: 0.95rem;\n" +
+                    "            box-sizing: border-box;\n" +
+                    "        }\n" +
+                    "        .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }\n" +
+                    "        .modal-actions button { padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; border: none; font-size: 0.9rem; }\n" +
+                    "        .btn-cancel { background: #ecf0f1; color: #555; }\n" +
+                    "        .btn-confirm { background: #3498db; color: #fff; }\n" +
                     "    </style>\n" +
                     "</head>\n" +
                     "<body>\n" +
                     "    <div class=\"header\">\n" +
                     "        <h1>JNFS 运维监控中心</h1>\n" +
+                    (authEnabled
+                            ? "        <div class=\"header-actions\">\n" +
+                              "            <button onclick=\"openChangePasswordModal()\">修改密码</button>\n" +
+                              "            <a href=\"/logout\">登出</a>\n" +
+                              "        </div>\n"
+                            : "") +
                     "    </div>\n" +
                     "    <div class=\"container\">\n" +
                     "        <div class=\"stats-grid\">\n" +
@@ -248,6 +350,21 @@ public class DashboardServer {
                     "        <div class=\"refresh-info\">数据每 2 秒自动刷新</div>\n" +
                     "    </div>\n" +
                     "\n" +
+                    (authEnabled
+                            ? "    <!-- 修改密码弹窗 -->\n" +
+                              "    <div class=\"modal-overlay\" id=\"changePwdModal\">\n" +
+                              "        <div class=\"modal\">\n" +
+                              "            <h2>修改密码</h2>\n" +
+                              "            <input type=\"password\" id=\"oldPassword\" placeholder=\"旧密码\" autocomplete=\"current-password\">\n" +
+                              "            <input type=\"password\" id=\"newPassword\" placeholder=\"新密码（至少 4 位）\" autocomplete=\"new-password\">\n" +
+                              "            <div class=\"modal-actions\">\n" +
+                              "                <button class=\"btn-cancel\" onclick=\"closeChangePasswordModal()\">取消</button>\n" +
+                              "                <button class=\"btn-confirm\" onclick=\"submitChangePassword()\">确认修改</button>\n" +
+                              "            </div>\n" +
+                              "        </div>\n" +
+                              "    </div>\n"
+                            : "") +
+                    "\n" +
                     "    <script>\n" +
                     "        function formatBytes(bytes, decimals = 2) {\n" +
                     "            if (bytes === 0) return '0 Bytes';\n" +
@@ -260,8 +377,12 @@ public class DashboardServer {
                     "\n" +
                     "        function loadData() {\n" +
                     "            fetch('/api/nodes')\n" +
-                    "                .then(res => res.json())\n" +
+                    "                .then(res => {\n" +
+                    "                    if (res.redirected) { location.href = res.url; return null; }\n" +
+                    "                    return res.json();\n" +
+                    "                })\n" +
                     "                .then(data => {\n" +
+                    "                    if (!data) return;\n" +
                     "                    const tbody = document.querySelector('#nodeTable tbody');\n" +
                     "                    \n" +
                     "                    // 统计数据\n" +
@@ -303,36 +424,68 @@ public class DashboardServer {
                     "                    document.getElementById('activeNodes').innerText = activeCount;\n" +
                     "                    document.getElementById('totalFreeSpace').innerText = formatBytes(totalSpace);\n" +
                     "                })\n" +
+                    "                .catch(err => {\n" +
+                    "                    console.error('Fetch error:', err);\n" +
+                    "                    document.querySelector('#nodeTable tbody').innerHTML = '<tr><td colspan=\"5\" style=\"text-align:center;color:red;\">无法连接到服务器</td></tr>';\n" +
+                    "                });\n" +
                     "\n" +
                     "            // 加载安全状态\n" +
                     "            fetch('/api/security')\n" +
-                    "                .then(res => res.json())\n" +
+                    "                .then(res => {\n" +
+                    "                    if (res.redirected) { location.href = res.url; return null; }\n" +
+                    "                    return res.json();\n" +
+                    "                })\n" +
                     "                .then(data => {\n" +
+                    "                    if (!data) return;\n" +
                     "                    const el = document.getElementById('securityStatus');\n" +
                     "                    if (data.securityConfigured) {\n" +
                     "                        el.innerHTML = '<span style=\\'color:#2e7d32\\'>已配置 (自定义令牌)</span>';\n" +
                     "                    } else {\n" +
                     "                        el.innerHTML = '<span style=\\'color:#e67e22\\'>⚠ 使用默认令牌</span>';\n" +
                     "                    }\n" +
-                    "                })\n" +
-                    "                .catch(err => {\n" +
-                    "                    console.error('Fetch error:', err);\n" +
-                    "                    document.querySelector('#nodeTable tbody').innerHTML = '<tr><td colspan=\"5\" style=\"text-align:center;color:red;\">无法连接到服务器</td></tr>';\n" +
                     "                });\n" +
                     "        }\n" +
+                    "\n" +
+                    (authEnabled
+                            ? "        function openChangePasswordModal() {\n" +
+                              "            document.getElementById('changePwdModal').classList.add('show');\n" +
+                              "        }\n" +
+                              "        function closeChangePasswordModal() {\n" +
+                              "            document.getElementById('changePwdModal').classList.remove('show');\n" +
+                              "            document.getElementById('oldPassword').value = '';\n" +
+                              "            document.getElementById('newPassword').value = '';\n" +
+                              "        }\n" +
+                              "        function submitChangePassword() {\n" +
+                              "            const oldPassword = document.getElementById('oldPassword').value;\n" +
+                              "            const newPassword = document.getElementById('newPassword').value;\n" +
+                              "            if (!oldPassword || !newPassword) { alert('请填写完整'); return; }\n" +
+                              "            fetch('/api/change-password', {\n" +
+                              "                method: 'POST',\n" +
+                              "                headers: {'Content-Type': 'application/x-www-form-urlencoded'},\n" +
+                              "                body: 'oldPassword=' + encodeURIComponent(oldPassword) + '&newPassword=' + encodeURIComponent(newPassword)\n" +
+                              "            })\n" +
+                              "            .then(res => {\n" +
+                              "                if (res.redirected) { location.href = res.url; return null; }\n" +
+                              "                return res.json();\n" +
+                              "            })\n" +
+                              "            .then(data => {\n" +
+                              "                if (!data) return;\n" +
+                              "                if (data.success) {\n" +
+                              "                    alert(data.message);\n" +
+                              "                    location.href = '/login';\n" +
+                              "                } else {\n" +
+                              "                    alert('修改失败: ' + (data.error || '未知错误'));\n" +
+                              "                }\n" +
+                              "            })\n" +
+                              "            .catch(err => alert('请求失败: ' + err));\n" +
+                              "        }\n"
+                            : "") +
                     "\n" +
                     "        setInterval(loadData, 2000);\n" +
                     "        loadData();\n" +
                     "    </script>\n" +
                     "</body>\n" +
                     "</html>";
-
-            byte[] response = html.getBytes(StandardCharsets.UTF_8);
-            exchange.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8");
-            exchange.sendResponseHeaders(200, response.length);
-            try (java.io.OutputStream os = exchange.getResponseBody()) {
-                os.write(response);
-            }
         }
     }
 }
