@@ -380,6 +380,44 @@ DataNode 升级后第一次心跳到 Registry,心跳格式为 `node_id|host:port
 | file 模式对应处理 | `namenode_meta.log` 中历史行的 `host:port`,在 NameNode 启动后按 Registry 查到的 `host:port → node_id` 映射在线反查补全;新增行直接写入 `node_id` |
 | v1→v2 删除 `datanode_addr` 的前置条件 | `SELECT COUNT(*) FROM file_location WHERE datanode_id IS NULL` 结果为 0 |
 
+### 4.10 跨模式数据导入 (file → mysql)
+
+#### 4.10.1 背景
+
+存在「单机 file 部署 → 分布式 mysql 部署」的运维场景：一个原本以 file 模式运行、已积累 `namenode_meta.log` 的部署，改配 `mode: mysql` 后直接重启。此时必须自动把 file 历史元数据导入 mysql，否则历史文件元数据全部丢失。
+
+这不是 schema 版本演进，而是**跨存储模式的一次性数据搬运**，因此**不**建模为版本化 `MigrationStep`：
+
+- `MigrationStep.supports(mode)` 只认一种模式，而跨模式导入需同时读 file、写 mysql；
+- file/mysql 版本序列相互独立（§4.1），mysql schema 本次不变（仍 v1），无版本递增；
+- 全新 mysql 部署时 `MigrationRunner` 直接返回 `CURRENT_VERSION` 并跳过所有步骤（§4.6），即便注册成 step 也不会执行。
+
+实现为独立组件 `org.jnfs.namenode.migration.FileToMysqlImporter`，在 `NameNodeServer` mysql 分支、建表之后、业务初始化（recover）之前调用。
+
+#### 4.10.2 触发条件与流程
+
+1. 仅当 `metadata.mode = mysql` 且 `namenode_meta.log` 存在时触发。
+2. 先 `MigrationRunner.run(FILE, dataDir, null)` 把 file 日志规整为 V1（V0 无 storageId 的老日志在此补齐稳定 storageId，保证后续导入幂等）。
+3. 若完成标记 `file_to_mysql_imported` 存在 → 跳过；否则执行导入，完成后原子写标记。
+
+数据映射（file 行 `ADD|filename|hash|address|storageId`）：
+
+| 目标 | 写入方式 |
+|---|---|
+| `file_metadata` | `INSERT IGNORE`（主键 storage_id 去重，保 INV-1 / INV-2） |
+| `file_location` | `address` 为 host:port → 写 `datanode_addr`、`datanode_id=NULL`；为 node_id → 写 `datanode_id`、`datanode_addr=NULL` |
+
+**不**在冷导入时反查补全 `node_id`（与 §4.9 一致）—— host:port 行留 `datanode_id IS NULL`，由 DataNode 注册心跳时 `backfillDataNodeIds()` 在线补齐；读路径 `COALESCE(datanode_id, datanode_addr)` 天然兼容两种写法的中间态。
+
+#### 4.10.3 幂等可重入（INV-3）
+
+- **per-row 幂等**：`file_metadata` 用 `INSERT IGNORE`；`file_location` 因 `datanode_id` 可为 NULL、UNIQUE 键无法去重，故先用 NULL 安全等值（`<=>`）查重再插入。
+- **完成标记**：全部导入完成后才写 `file_to_mysql_imported`（tmp + fsync + rename 原子写）。
+- **崩溃恢复**：中途崩溃 → 标记不存在 → 重跑；per-row 幂等跳过已导入行、补齐剩余后写标记。二次正常启动命中标记即跳过。
+- **失败拒绝启动（INV-4）**：导入抛异常 → `NameNodeServer` 捕获 → `System.exit(2)`。
+
+> 标记文件记录导入计数供运维审计；删除标记即可强制重导（per-row 幂等保证重导不产生重复）。导入为单向、非破坏源 —— 不改不删 `namenode_meta.log`，可回退 file 模式。
+
 ---
 
 ## 5. 落地计划

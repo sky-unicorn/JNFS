@@ -30,6 +30,7 @@ import org.jnfs.common.SecurityConfig;
 import org.jnfs.common.migration.MigrationResult;
 import org.jnfs.common.migration.MigrationRunner;
 import org.jnfs.common.migration.StorageMode;
+import org.jnfs.namenode.migration.FileToMysqlImporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -296,6 +297,24 @@ public class NameNodeServer {
                 }
 
                 metadataManager = new MySQLMetadataManager(dbHost, dbPort, dbName, user, password);
+
+                // --- file → mysql 自动导入（单机转分布式场景） ---
+                // 若存在 file 模式历史日志, 先规整为 V1(稳定 storageId), 再导入 mysql
+                File logFile = new File(dataDir, MigrationRunner.METADATA_LOG_FILE);
+                if (logFile.exists()) {
+                    MigrationResult fileMigration = MigrationRunner.run(StorageMode.FILE, dataDir, null);
+                    if (fileMigration.isFailed()) {
+                        LOG.error("file 日志迁移失败，拒绝启动。原因: {}", fileMigration.getMessage());
+                        System.exit(2);
+                    }
+                    try {
+                        FileToMysqlImporter.importIfApplicable(
+                                dataDir, ((MySQLMetadataManager) metadataManager).getDataSource());
+                    } catch (Exception e) {
+                        LOG.error("file→mysql 自动导入失败，拒绝启动。原因: {}", e.getMessage(), e);
+                        System.exit(2);
+                    }
+                }
             } else {
                 LOG.info("使用本地文件元数据存储");
 
