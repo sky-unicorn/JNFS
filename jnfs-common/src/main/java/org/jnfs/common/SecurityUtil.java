@@ -11,7 +11,6 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
-import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
@@ -71,13 +70,14 @@ public class SecurityUtil {
      */
     public void encryptFile(File srcFile, File destFile) throws Exception {
         File tmpFile = new File(destFile.getParentFile(), destFile.getName() + ".jnfs_tmp");
+        // bodyTmp 声明提到 try 之外，以便 catch/finally 统一清理，避免临时文件泄漏
+        File bodyTmp = new File(destFile.getParentFile(), destFile.getName() + ".jnfs_body_tmp");
         try {
             // 生成随机 IV
             byte[] iv = new byte[IV_LENGTH];
             secureRandom.nextBytes(iv);
 
             // 先写入密文到临时文件 (IV + ciphertext 部分)
-            File bodyTmp = new File(destFile.getParentFile(), destFile.getName() + ".jnfs_body_tmp");
             try (FileInputStream fis = new FileInputStream(srcFile);
                  FileOutputStream bodyOut = new FileOutputStream(bodyTmp)) {
 
@@ -133,76 +133,74 @@ public class SecurityUtil {
             if (tmpFile.exists()) {
                 tmpFile.delete();
             }
+            if (bodyTmp.exists()) {
+                bodyTmp.delete();
+            }
             throw e;
         }
     }
 
     /**
      * 解密文件，自动检测格式 (CTR+HMAC v1 或旧版 ECB)
+     *
+     * <p>流式实现：复用 {@link #createDecryptOutputStream} 的 CTR+HMAC 解密逻辑，
+     * 逐块读取密文并写出明文，内存恒定 O(块大小)。大文件不再 OOM。
      */
     public void decryptFile(File srcFile, File destFile) throws Exception {
-        try (FileInputStream fis = new FileInputStream(srcFile)) {
-            int firstByte = fis.read();
+        // 先探测首字节判断格式；v1 文件需要从首字节起完整喂给流式解密器，
+        // 因此无论格式如何，都重新打开 FileInputStream 从头读取。
+        try (FileInputStream probe = new FileInputStream(srcFile)) {
+            int firstByte = probe.read();
             if (firstByte == -1) {
                 throw new IOException("文件为空");
             }
-
             if (firstByte != VERSION_CTR_HMAC) {
+                // 旧版 ECB 格式，decryptLegacyFile 已是流式（CipherInputStream）
                 decryptLegacyFile(srcFile, destFile);
                 return;
             }
+        }
 
-            // 读取 HMAC (32 字节)
-            byte[] storedHmac = readFully(fis, HMAC_LENGTH);
-
-            // 读取 IV (16 字节)
-            byte[] iv = readFully(fis, IV_LENGTH);
-
-            // 读取剩余密文
-            byte[] ciphertext = readAll(fis);
-
-            // 验证 HMAC-SHA256 (IV + ciphertext)
-            byte[] computedHmac = computeHmac(iv, ciphertext);
-            if (!MessageDigest.isEqual(storedHmac, computedHmac)) {
-                throw new IOException("HMAC 验证失败，文件可能被篡改");
-            }
-
-            // AES-CTR 解密
-            Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, aesKey, new IvParameterSpec(iv));
-            byte[] plaintext = cipher.doFinal(ciphertext);
-
-            // 写入目标文件
-            try (FileOutputStream fos = new FileOutputStream(destFile)) {
-                fos.write(plaintext);
+        // v1: [version][HMAC(32)][IV(16)][ciphertext] 全部流式喂给解密器
+        // 解密器内部会缓冲 header、流式解密、close 时校验 HMAC；
+        // HMAC 失败时会关闭并删除已写出的目标文件，再抛 IOException。
+        try (FileInputStream fis = new FileInputStream(srcFile);
+             FileOutputStream fos = new FileOutputStream(destFile);
+             OutputStream decryptStream = createDecryptOutputStream(fos, destFile)) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = fis.read(buf)) != -1) {
+                decryptStream.write(buf, 0, n);
             }
         }
     }
 
     /**
-     * 创建 CTR+HMAC 流式解密输出流
+     * 创建 CTR+HMAC 流式解密输出流。
      *
-     * 工作原理:
-     * 1. 缓存收到的所有加密数据
-     * 2. close() 时读取 header, 验证 HMAC, CTR 解密写出
+     * <p>真流式实现：缓冲固定 49 字节 header 后，每收到一块密文立即
+     * {@code cipher.update} 得明文写出、{@code mac.update} 累积 HMAC，
+     * 内存恒定 O(块大小)。close() 时 {@code mac.doFinal()} 常量时间比较，
+     * 失败则删除目标文件并抛 IOException（落地+失败回滚）。
+     *
+     * <p>不掌握目标文件路径，HMAC 失败时无法自动删除已写出的明文。
+     * 若需要自动回滚，请使用 {@link #createDecryptOutputStream(OutputStream, File)}。
      */
     public OutputStream createDecryptOutputStream(OutputStream out) {
-        return new CtrHmacDecryptStream(out);
+        return new CtrHmacDecryptStream(out, null);
+    }
+
+    /**
+     * 创建 CTR+HMAC 流式解密输出流，并记录目标文件用于 HMAC 失败回滚。
+     *
+     * @param out        底层输出流（明文落地目标）
+     * @param targetFile 目标文件；HMAC 校验失败时删除此文件以避免脏数据
+     */
+    public OutputStream createDecryptOutputStream(OutputStream out, File targetFile) {
+        return new CtrHmacDecryptStream(out, targetFile);
     }
 
     // ======================== 内部实现 ========================
-
-    /**
-     * 计算 HMAC-SHA256
-     */
-    private byte[] computeHmac(byte[]... data) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(hmacKey, "HmacSHA256"));
-        for (byte[] d : data) {
-            mac.update(d);
-        }
-        return mac.doFinal();
-    }
 
     /**
      * 计算文件的 HMAC-SHA256 (流式处理，避免大文件内存溢出)
@@ -240,135 +238,226 @@ public class SecurityUtil {
         }
     }
 
-    /**
-     * 从流中精确读取指定字节数
-     */
-    private static byte[] readFully(InputStream in, int length) throws IOException {
-        byte[] buf = new byte[length];
-        int offset = 0;
-        while (offset < length) {
-            int n = in.read(buf, offset, length - offset);
-            if (n == -1) {
-                throw new IOException("Unexpected end of stream (expected " + length + " bytes, got " + offset + ")");
-            }
-            offset += n;
-        }
-        return buf;
-    }
-
-    /**
-     * 读取流中剩余全部字节
-     */
-    private static byte[] readAll(InputStream in) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        byte[] buf = new byte[8192];
-        int n;
-        while ((n = in.read(buf)) != -1) {
-            bos.write(buf, 0, n);
-        }
-        return bos.toByteArray();
-    }
-
     // ======================== 内部类: CTR+HMAC 流式解密 ========================
 
+    /**
+     * CTR+HMAC 流式解密输出流。
+     *
+     * <p>v1 格式 [version(0x01)][HMAC(32)][IV(16)][ciphertext] 采用真流式处理：
+     * <ul>
+     *   <li>缓冲固定 49 字节 header 后，初始化 AES/CTR/NoPadding 解密器与 HmacSHA256；</li>
+     *   <li>每收到一块密文立即 {@code cipher.update} 得明文 {@code out.write}，
+     *       {@code mac.update} 累积 HMAC；</li>
+     *   <li>{@code close()} 时执行 {@code cipher.doFinal} 写出尾部，并以
+     *       {@link MessageDigest#isEqual} 常量时间比较 {@code mac.doFinal()} 与存储 HMAC。</li>
+     * </ul>
+     * 内存占用恒为 O(块大小)，不再累积全部密文。
+     *
+     * <p><b>落地 + 失败回滚语义</b>：明文在 HMAC 校验前已流式写入目标文件；
+     * 一旦 {@code close()} 校验 HMAC 失败，会关闭底层流并删除已知的目标文件，
+     * 随后抛出 {@link IOException}，避免留下被篡改的脏数据。
+     *
+     * <p><b>legacy ECB 路径</b>：若首字节非 0x01，按 AES/ECB/PKCS5Padding 解密。
+     * ECB 无 IV，因此同样以 {@code cipher.update} 流式产出明文（内存 O(1)）。
+     * PKCS5Padding 的填充合法性仅在 {@code doFinal()} 时才能判定，因此 legacy
+     * 路径的数据完整性同样需到 {@code close()} 才确认（历史小文件，风险可控）。
+     */
     private class CtrHmacDecryptStream extends FilterOutputStream {
 
-        private byte[] buffer = new byte[0];
+        /** v1 header 缓冲：version(1) + HMAC(32) + IV(16) = 49 字节 */
+        private final byte[] headerBuf = new byte[HEADER_LENGTH];
+        private int headerBytesRead = 0;
         private boolean versionRead = false;
+        private boolean headerDone = false;
         private boolean isLegacy = false;
         private boolean closed = false;
 
-        CtrHmacDecryptStream(OutputStream out) {
+        private Cipher cipher;
+        private Mac mac;
+        private byte[] storedHmac;
+
+        /** HMAC 失败时用于删除已写出的目标文件；裸 OutputStream 构造时为 null */
+        private final File targetFile;
+
+        CtrHmacDecryptStream(OutputStream out, File targetFile) {
             super(out);
+            this.targetFile = targetFile;
         }
 
         @Override
         public void write(int b) throws IOException {
-            append(new byte[]{(byte) b}, 0, 1);
+            write(new byte[]{(byte) b}, 0, 1);
         }
 
         @Override
         public void write(byte[] b, int off, int len) throws IOException {
-            append(b, off, len);
-        }
+            if (closed) {
+                throw new IOException("Stream closed");
+            }
 
-        private void append(byte[] b, int off, int len) throws IOException {
-            byte[] newBuf = new byte[buffer.length + len];
-            System.arraycopy(buffer, 0, newBuf, 0, buffer.length);
-            System.arraycopy(b, off, newBuf, buffer.length, len);
-            buffer = newBuf;
-        }
+            int pos = off;
+            int remaining = len;
 
-        @Override
-        public void close() throws IOException {
-            if (closed) return;
-            closed = true;
+            while (remaining > 0) {
+                if (!headerDone) {
+                    // 阶段一：读取/填充 header，直到能决定 legacy/v1 并初始化 cipher
+                    if (!versionRead) {
+                        // 读取首字节以判断文件格式
+                        headerBuf[0] = b[pos];
+                        headerBytesRead = 1;
+                        versionRead = true;
+                        pos++;
+                        remaining--;
 
-            try {
-                if (buffer.length == 0) {
-                    return;
-                }
+                        if (headerBuf[0] != VERSION_CTR_HMAC) {
+                            // 旧版 ECB：首字节即为密文
+                            isLegacy = true;
+                            initLegacyCipher();
+                            byte[] plain = cipher.update(headerBuf, 0, 1);
+                            if (plain != null && plain.length > 0) {
+                                out.write(plain);
+                            }
+                            headerDone = true;
+                        }
+                    }
 
-                byte version = buffer[0];
-                if (version != VERSION_CTR_HMAC) {
-                    // 旧版 ECB 格式
-                    decryptLegacyBuffer();
-                    return;
-                }
+                    if (!headerDone && !isLegacy) {
+                        // v1：继续填充剩余 header
+                        int headerNeeded = HEADER_LENGTH - headerBytesRead;
+                        int toCopy = Math.min(headerNeeded, remaining);
+                        if (toCopy > 0) {
+                            System.arraycopy(b, pos, headerBuf, headerBytesRead, toCopy);
+                            headerBytesRead += toCopy;
+                            pos += toCopy;
+                            remaining -= toCopy;
+                        }
 
-                // CTR+HMAC 格式: 需要完整的 header
-                if (buffer.length < HEADER_LENGTH) {
-                    throw new IOException("数据不完整: 期望至少 " + HEADER_LENGTH
-                            + " 字节 header，实际 " + buffer.length + " 字节");
-                }
-
-                // 提取 header 字段
-                byte[] storedHmac = new byte[HMAC_LENGTH];
-                System.arraycopy(buffer, 1, storedHmac, 0, HMAC_LENGTH);
-
-                byte[] iv = new byte[IV_LENGTH];
-                System.arraycopy(buffer, 1 + HMAC_LENGTH, iv, 0, IV_LENGTH);
-
-                // 提取密文
-                int ciphertextLen = buffer.length - HEADER_LENGTH;
-                byte[] ciphertext = new byte[ciphertextLen];
-                System.arraycopy(buffer, HEADER_LENGTH, ciphertext, 0, ciphertextLen);
-
-                // 验证 HMAC-SHA256 (IV + ciphertext)
-                byte[] computedHmac = computeHmac(iv, ciphertext);
-                if (!MessageDigest.isEqual(storedHmac, computedHmac)) {
-                    throw new IOException("HMAC 验证失败，数据可能被篡改");
-                }
-
-                // AES-CTR 解密
-                Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
-                cipher.init(Cipher.DECRYPT_MODE, aesKey, new IvParameterSpec(iv));
-                byte[] plaintext = cipher.doFinal(ciphertext);
-
-                out.write(plaintext);
-            } catch (IOException e) {
-                throw e;
-            } catch (Exception e) {
-                throw new IOException("CTR+HMAC 解密失败", e);
-            } finally {
-                buffer = new byte[0];
-                if (out != null) {
-                    out.close();
+                        if (headerBytesRead == HEADER_LENGTH) {
+                            initCtrCipher();
+                            headerDone = true;
+                        }
+                    }
+                } else {
+                    // 阶段二：header 到齐，真流式解密/写出
+                    if (isLegacy) {
+                        byte[] plain = cipher.update(b, pos, remaining);
+                        if (plain != null && plain.length > 0) {
+                            out.write(plain);
+                        }
+                    } else {
+                        mac.update(b, pos, remaining);
+                        byte[] plain = cipher.update(b, pos, remaining);
+                        if (plain != null && plain.length > 0) {
+                            out.write(plain);
+                        }
+                    }
+                    pos += remaining;
+                    remaining = 0;
                 }
             }
         }
 
-        private void decryptLegacyBuffer() throws IOException {
+        private void initLegacyCipher() throws IOException {
             try {
                 LOG.info("流式解密: 检测到旧版 ECB 格式");
                 SecretKeySpec legacyKeySpec = new SecretKeySpec(LEGACY_KEY, "AES");
-                Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
+                cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
                 cipher.init(Cipher.DECRYPT_MODE, legacyKeySpec);
-                byte[] plaintext = cipher.doFinal(buffer);
-                out.write(plaintext);
-                buffer = new byte[0];
             } catch (Exception e) {
-                throw new IOException("旧版格式解密失败", e);
+                throw new IOException("初始化旧版 ECB 解密失败", e);
+            }
+        }
+
+        private void initCtrCipher() throws IOException {
+            try {
+                storedHmac = new byte[HMAC_LENGTH];
+                System.arraycopy(headerBuf, 1, storedHmac, 0, HMAC_LENGTH);
+
+                byte[] iv = new byte[IV_LENGTH];
+                System.arraycopy(headerBuf, 1 + HMAC_LENGTH, iv, 0, IV_LENGTH);
+
+                cipher = Cipher.getInstance("AES/CTR/NoPadding");
+                cipher.init(Cipher.DECRYPT_MODE, aesKey, new IvParameterSpec(iv));
+
+                mac = Mac.getInstance("HmacSHA256");
+                mac.init(new SecretKeySpec(hmacKey, "HmacSHA256"));
+                // HMAC 覆盖 (IV + ciphertext)
+                mac.update(iv);
+            } catch (Exception e) {
+                throw new IOException("初始化 CTR+HMAC 解密失败", e);
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            if (closed) {
+                return;
+            }
+            closed = true;
+
+            IOException failure = null;
+            try {
+                if (!headerDone) {
+                    if (headerBytesRead == 0) {
+                        // 空输入：保持与旧行为一致，留空文件
+                        return;
+                    }
+                    if (headerBuf[0] == VERSION_CTR_HMAC && headerBytesRead < HEADER_LENGTH) {
+                        throw new IOException("数据不完整: 期望至少 " + HEADER_LENGTH
+                                + " 字节 header，实际仅 " + headerBytesRead + " 字节");
+                    }
+                    // legacy 但数据不足一个块：让 doFinal() 抛出 BadPaddingException
+                }
+
+                // 写出可能的 doFinal 尾部（CTR 无 padding，通常为空或少量字节）
+                if (cipher != null) {
+                    byte[] tail = cipher.doFinal();
+                    if (tail != null && tail.length > 0) {
+                        out.write(tail);
+                    }
+                }
+
+                if (!isLegacy && mac != null) {
+                    // 常量时间比较 HMAC
+                    byte[] computed = mac.doFinal();
+                    if (!MessageDigest.isEqual(storedHmac, computed)) {
+                        failure = new IOException("HMAC 验证失败，数据可能被篡改");
+                    }
+                }
+            } catch (IOException e) {
+                failure = (failure != null) ? failure : e;
+            } catch (Exception e) {
+                // legacy ECB 路径的 doFinal() 抛 BadPaddingException 时也走此分支，
+                // 按 isLegacy 区分错误信息，避免 ECB 失败被误报为 CTR+HMAC 解密失败。
+                failure = new IOException(
+                        isLegacy ? "旧版 ECB 解密失败（数据损坏或密钥不匹配）" : "CTR+HMAC 解密失败",
+                        e);
+            } finally {
+                try {
+                    out.close();
+                } catch (IOException e) {
+                    if (failure == null) {
+                        failure = e;
+                    }
+                }
+                // 失败回滚：删除已写出的（可能被篡改的）明文，避免脏数据
+                if (failure != null && targetFile != null) {
+                    deleteTargetFileSafely(targetFile);
+                }
+            }
+
+            if (failure != null) {
+                throw failure;
+            }
+        }
+
+        private void deleteTargetFileSafely(File file) {
+            try {
+                if (file != null && file.exists() && !file.delete()) {
+                    LOG.warn("HMAC 校验失败后未能删除目标文件: {}", file.getAbsolutePath());
+                }
+            } catch (Exception e) {
+                LOG.warn("删除目标文件异常: {}", file.getAbsolutePath(), e);
             }
         }
     }

@@ -519,7 +519,7 @@ public class JNFSDriver {
     private String getDataNodeForUpload() throws Exception {
         Packet response = sendRequestToNameNode(CommandType.NAMENODE_REQUEST_UPLOAD_LOC, new byte[0]);
         if (response.getCommandType() == CommandType.ERROR) {
-             throw new IOException("获取上传节点失败: " + new String(response.getData(), StandardCharsets.UTF_8));
+            throw new IOException("获取上传节点失败: " + new String(response.getData(), StandardCharsets.UTF_8));
         }
         return new String(response.getData(), StandardCharsets.UTF_8);
     }
@@ -527,7 +527,7 @@ public class JNFSDriver {
     private String getDownloadLocation(String storageId) throws Exception {
         Packet response = sendRequestToNameNode(CommandType.NAMENODE_REQUEST_DOWNLOAD_LOC, storageId.getBytes(StandardCharsets.UTF_8));
         if (response.getCommandType() == CommandType.ERROR) {
-             throw new IOException("获取下载节点失败: " + new String(response.getData(), StandardCharsets.UTF_8));
+            throw new IOException("获取下载节点失败: " + new String(response.getData(), StandardCharsets.UTF_8));
         }
         return new String(response.getData(), StandardCharsets.UTF_8);
     }
@@ -537,7 +537,7 @@ public class JNFSDriver {
         Packet response = sendRequestToNameNode(CommandType.NAMENODE_COMMIT_FILE, payload.getBytes(StandardCharsets.UTF_8));
 
         if (response.getCommandType() == CommandType.ERROR) {
-             throw new IOException("提交元数据失败: " + new String(response.getData(), StandardCharsets.UTF_8));
+            throw new IOException("提交元数据失败: " + new String(response.getData(), StandardCharsets.UTF_8));
         }
 
         return new String(response.getData(), StandardCharsets.UTF_8);
@@ -585,15 +585,19 @@ public class JNFSDriver {
         Bootstrap b = NettyClientBootstrap.createWithHandler(group, 5000, handler);
 
         Channel channel = NettyClientBootstrap.connectSync(b, host, port, 6000);
+        // 无论成功/失败（含 HMAC 校验失败、超时、连接异常）都必须关闭 channel，
+        // 否则会泄漏一个 socket + Netty Channel，直至 EventLoopGroup 关闭。
+        try {
+            Packet request = new Packet();
+            request.setCommandType(CommandType.DOWNLOAD_REQUEST);
+            request.setToken(SecurityConfig.getToken());
+            request.setData(hash.getBytes(StandardCharsets.UTF_8));
+            channel.writeAndFlush(request);
 
-        Packet request = new Packet();
-        request.setCommandType(CommandType.DOWNLOAD_REQUEST);
-        request.setToken(SecurityConfig.getToken());
-        request.setData(hash.getBytes(StandardCharsets.UTF_8));
-        channel.writeAndFlush(request);
-
-        handler.waitForCompletion();
-        channel.close().sync();
+            handler.waitForCompletion();
+        } finally {
+            channel.close().sync();
+        }
     }
 
     // --- 使用连接池发送请求 ---
@@ -774,8 +778,9 @@ public class JNFSDriver {
         private OutputStream out;
         private long fileSize = -1;
         private long receivedBytes = 0;
-        private final BlockingQueue<Boolean> completionSignal = new LinkedBlockingQueue<>();
+        private final BlockingQueue<Object> completionSignal = new LinkedBlockingQueue<>();
         private final Logger logger;
+        private volatile String failureMessage;
 
         public DownloadHandler(File targetFile, SecurityUtil securityUtil, Logger logger) {
             this.targetFile = targetFile;
@@ -809,9 +814,16 @@ public class JNFSDriver {
                 if (targetFile.exists()) {
                     targetFile.delete();
                 }
-                // 使用 SecurityUtil 创建流式解密输出流
-                this.out = securityUtil.createDecryptOutputStream(new FileOutputStream(targetFile));
+                // 使用双参重载传入 targetFile，以便 HMAC 校验失败时自动删除已写出的脏明文
+                this.out = securityUtil.createDecryptOutputStream(new FileOutputStream(targetFile), targetFile);
                 logger.info("[Driver] 开始接收文件流，大小: {}", fileSize);
+
+                // 空文件：无后续 ByteBuf chunk 投递，直接完成
+                if (fileSize == 0) {
+                    logger.info("[Driver] 空文件下载完成");
+                    closeFile();
+                    completionSignal.offer(true);
+                }
 
             } else if (msg instanceof ByteBuf) {
                 // 处理文件流数据
@@ -824,36 +836,88 @@ public class JNFSDriver {
 
                     if (receivedBytes >= fileSize) {
                         logger.info("[Driver] 下载完成");
-                        closeFile();
-                        completionSignal.offer(true);
+                        try {
+                            closeFile();
+                            completionSignal.offer(true);
+                        } catch (IOException e) {
+                            // closeFile() 抛出 IOException（含 HMAC 校验失败），
+                            // 必须将失败传播给调用方，不能吞掉
+                            failureMessage = e.getMessage();
+                            logger.error("[Driver] 关闭解密流失败: {}", e.getMessage());
+                            completionSignal.offer(e);
+                        }
                     }
                 }
             }
         }
 
-        private void closeFile() {
-             try {
-                 if (out != null) {
-                     out.close();
-                 }
-             } catch (IOException e) {
-                 logger.error("关闭文件输出流失败", e);
-             } finally {
-                 out = null;
-             }
+        private void closeFile() throws IOException {
+            try {
+                if (out != null) {
+                    out.close();
+                }
+            } finally {
+                out = null;
+            }
         }
 
         public void waitForCompletion() throws IOException, InterruptedException {
-            Boolean result = completionSignal.poll(30, TimeUnit.MINUTES);
-            if (result == null || !result) {
+            Object result = completionSignal.poll(30, TimeUnit.MINUTES);
+            if (result == null) {
                 throw new IOException("下载超时或失败");
             }
+            if (result instanceof IOException) {
+                throw (IOException) result;
+            }
+            if (result.equals(false)) {
+                String msg = failureMessage != null ? failureMessage : "下载超时或失败";
+                throw new IOException(msg);
+            }
+        }
+
+        @Override
+        public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+            // DataNode 在下载中途优雅关闭连接（发 FIN，无异常）时走此路径而非
+            // exceptionCaught。默认 no-op 实现会导致解密流 out 永不 close()，
+            // HMAC 永不校验，completionSignal 永不注入，waitForCompletion 阻塞满
+            // 30 分钟才超时，且 targetPath 上残留半截已解密明文（脏数据）。
+            // 此处主动关闭解密流以触发 HMAC 校验（失败则自动删除脏文件），
+            // 并注入失败信号唤醒调用方，与 exceptionCaught 路径对齐。
+            try {
+                closeFile();
+            } catch (IOException e) {
+                // closeFile 抛 IOException 通常意味着 HMAC 校验失败（数据被篡改/
+                // 不完整），文件已被解密流自动删除。该数据完整性错误必须透传。
+                logger.error("[Driver] 连接断开时关闭解密流失败（可能 HMAC 校验失败）", e);
+                failureMessage = e.getMessage();
+                if (completionSignal.isEmpty()) {
+                    completionSignal.offer(e);
+                }
+            }
+            if (completionSignal.isEmpty()) {
+                if (failureMessage == null) {
+                    failureMessage = "DataNode 连接中断";
+                }
+                completionSignal.offer(false);
+            }
+            super.channelInactive(ctx);
         }
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             logger.error("DownloadHandler异常", cause);
-            closeFile();
+            if (failureMessage == null) {
+                failureMessage = cause.getMessage();
+            }
+            try {
+                closeFile();
+            } catch (IOException e) {
+                // closeFile 抛 IOException 通常意味着 HMAC 校验失败（数据完整性事件），
+                // 其重要性高于原始网络异常（如 connection reset），故覆盖 failureMessage，
+                // 确保调用方看到真正的数据完整性错误而非误导性的网络错误。
+                logger.error("异常处理中关闭文件失败（可能 HMAC 校验失败）", e);
+                failureMessage = e.getMessage();
+            }
             ctx.close();
             completionSignal.offer(false);
         }
