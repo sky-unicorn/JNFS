@@ -2,7 +2,7 @@ package org.jnfs.common.migration;
 
 /**
  * 存储模式枚举
- * 对应配置中的 metadata.mode
+ * 对应 Registry 端 storage.mode（NameNode 启动时从 Registry 拉取，不再本地配置）
  */
 public enum StorageMode {
     FILE,

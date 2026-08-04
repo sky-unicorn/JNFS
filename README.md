@@ -86,9 +86,9 @@ mvn clean package
 
 1. **元数据存储必须使用 MySQL**:
    - **初始化数据库**: 将项目根目录下的 `mysql/jnfs.sql` 导入到 MySQL 数据库中。
-   - 必须在 `conf/namenode.yml` 中设置 `metadata.mode: mysql`。
+   - 在 `conf/registry.yml` 的 `storage` 段设置 `mode: mysql` + `mysql` 连接信息（NameNode 启动时从 Registry 拉取）。
    - ❌ **严禁使用 `file` 模式**：`file` 模式仅将元数据存储在各节点的本地磁盘，会导致集群脑裂、数据不一致。
-   - 所有 NameNode 节点必须配置连接到**同一个** MySQL 数据库实例。
+   - 所有 NameNode 节点依赖同一个 Registry，从该 Registry 拉到**同一个** MySQL 数据库实例（确保两端 `security.aes-key` 一致以便解密）。
 
 2. **分布式协同**:
    - MySQL 模式下，系统会自动启用基于数据库的分布式锁 (`file_upload_lock` 表)，确保文件上传时的并发安全。
@@ -184,28 +184,16 @@ registry:
   # 方式 2: 集群配置 (推荐)
   addresses: localhost:5367,localhost:5368
   
-# 元数据存储配置
-metadata:
-  # 存储模式:
-  # - file: 本地文件存储 (仅适合单机部署，无法共享元数据)
-  # - mysql: 数据库存储 (集群模式下必须使用 mysql，否则各节点元数据不一致且无法协同)
-  mode: file 
+# 存储配置说明：存储模式（file/mysql）与 MySQL 连接已统一到 registry.yml 的 storage 段，
+# NameNode 启动时从 Registry 拉取（AES 加密传输），此处无需重复配置。
 
-  # MySQL 连接配置 (当 mode: mysql 时生效)
-  mysql:
-    host: localhost
-    port: 3306
-    database: jnfs
-    user: root
-    password: password
-    
-  # 元数据缓存配置 (可选)
-  cache:
-    # 是否开启内存缓存 (默认: true)
-    enabled: true
-    # 缓存最大条目数 (默认: 100000)
-    # 根据 JVM 内存大小调整: 10w 条约占用 100MB 堆内存
-    max-size: 100000
+# 内存缓存配置 (NameNode 本地 JVM 调优，与存储模式无关)
+cache:
+  # 是否开启内存缓存 (默认: true)
+  enabled: true
+  # 缓存最大条目数 (默认: 100000)
+  # 根据 JVM 内存大小调整: 10w 条约占用 100MB 堆内存
+  max-size: 100000
 ```
 
 ### registry.yml (Registry 配置)

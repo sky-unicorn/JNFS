@@ -58,6 +58,10 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
     // 心跳超时时间 (默认30秒)，可由 RegistryServer 启动时修改
     public static volatile long heartbeatTimeout = 30 * 1000;
 
+    // storage 配置载荷（AES 加密后的密文 byte[]），由 RegistryServer 启动时注入；
+    // null 表示未配置 storage 段。NameNode 启动时经 REGISTRY_GET_STORAGE_CONFIG 拉取。
+    private static volatile byte[] storageConfigPayload;
+
     // 主动清理过期节点的定时任务 (使用统一的 Daemon 线程工厂)
     private static final ScheduledExecutorService cleanerExecutor = Executors.newSingleThreadScheduledExecutor(
             new DaemonThreadFactory("Registry-Cleaner"));
@@ -110,6 +114,15 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
         return Collections.unmodifiableMap(nameNodes);
     }
 
+    /**
+     * 注入 storage 配置载荷（AES 加密后的密文），供 NameNode 启动时拉取。
+     *
+     * @param payload 密文 byte[]；调 null 表示未配置 storage
+     */
+    public static void setStorageConfigPayload(byte[] payload) {
+        storageConfigPayload = payload;
+    }
+
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, Packet packet) throws Exception {
         if (!NettyHandlerHelper.validateToken(packet.getToken())) {
@@ -134,6 +147,9 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
                 break;
             case REGISTRY_GET_NAMENODES:
                 handleGetNameNodes(ctx);
+                break;
+            case REGISTRY_GET_STORAGE_CONFIG:
+                handleGetStorageConfig(ctx);
                 break;
             default:
                 NettyHandlerHelper.sendResponse(ctx, CommandType.ERROR, "未知命令".getBytes(StandardCharsets.UTF_8));
@@ -250,6 +266,15 @@ public class RegistryHandler extends SimpleChannelInboundHandler<Packet> {
 
         String response = String.join(",", activeNodes);
         NettyHandlerHelper.sendResponse(ctx, CommandType.REGISTRY_RESPONSE_DATANODES, response.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void handleGetStorageConfig(ChannelHandlerContext ctx) {
+        byte[] payload = storageConfigPayload;
+        if (payload == null) {
+            NettyHandlerHelper.sendError(ctx, "Registry 未配置 storage");
+            return;
+        }
+        NettyHandlerHelper.sendResponse(ctx, CommandType.REGISTRY_RESPONSE_STORAGE_CONFIG, payload);
     }
 
     private void handleGetNameNodes(ChannelHandlerContext ctx) {

@@ -65,6 +65,70 @@ public class SecurityUtil {
     // ======================== 公共 API ========================
 
     /**
+     * 加密内存中的短数据（AES-256-CTR + HMAC-SHA256，Encrypt-then-MAC）。
+     * <p>格式与文件版一致：{@code [version(0x01)][HMAC(32)][IV(16)][ciphertext]}。
+     * 适用于 RPC payload 等短数据，不落盘。
+     *
+     * @param plaintext 明文（UTF-8 字节）
+     * @return 密文（含 version + HMAC + IV 头）
+     */
+    public byte[] encryptBytes(byte[] plaintext) throws Exception {
+        byte[] iv = new byte[IV_LENGTH];
+        secureRandom.nextBytes(iv);
+
+        Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, aesKey, new IvParameterSpec(iv));
+        byte[] ciphertext = cipher.doFinal(plaintext);
+
+        // HMAC 覆盖 (IV + ciphertext)
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(hmacKey, "HmacSHA256"));
+        mac.update(iv);
+        mac.update(ciphertext);
+        byte[] hmac = mac.doFinal();
+
+        // 组装: version + hmac + iv + ciphertext
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(1 + HMAC_LENGTH + IV_LENGTH + ciphertext.length);
+        bos.write(VERSION_CTR_HMAC);
+        bos.write(hmac);
+        bos.write(iv);
+        bos.write(ciphertext);
+        return bos.toByteArray();
+    }
+
+    /**
+     * 解密 {@link #encryptBytes} 产出的数据，校验 HMAC（常量时间比较）。
+     * 失败抛 {@link IOException}，调用方应拒绝启动（防止被篡改/密钥不匹配）。
+     *
+     * @param data 密文
+     * @return 明文
+     */
+    public byte[] decryptBytes(byte[] data) throws Exception {
+        if (data == null || data.length < HEADER_LENGTH) {
+            throw new IOException("加密 payload 过短");
+        }
+        if (data[0] != VERSION_CTR_HMAC) {
+            throw new IOException("加密 payload 版本不匹配");
+        }
+        byte[] storedHmac = Arrays.copyOfRange(data, 1, 1 + HMAC_LENGTH);
+        byte[] iv = Arrays.copyOfRange(data, 1 + HMAC_LENGTH, 1 + HMAC_LENGTH + IV_LENGTH);
+        byte[] ciphertext = Arrays.copyOfRange(data, HEADER_LENGTH, data.length);
+
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(hmacKey, "HmacSHA256"));
+        mac.update(iv);
+        mac.update(ciphertext);
+        byte[] computed = mac.doFinal();
+        if (!MessageDigest.isEqual(storedHmac, computed)) {
+            throw new IOException("HMAC 验证失败，数据可能被篡改或密钥不匹配");
+        }
+
+        Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, aesKey, new IvParameterSpec(iv));
+        return cipher.doFinal(ciphertext);
+    }
+
+    /**
      * 加密文件 (AES-256-CTR + HMAC-SHA256)
      * 格式: [version(0x01)][HMAC(32)][IV(16)][ciphertext]
      */

@@ -7,6 +7,7 @@ import cn.hutool.crypto.digest.BCrypt;
 import org.jnfs.common.AppHomeInitializer;
 import org.jnfs.common.ConfigUtil;
 import org.jnfs.common.NettyServerUtils;
+import org.jnfs.common.SecurityUtil;
 import org.jnfs.registry.auth.AuthManager;
 import org.jnfs.registry.auth.FileUserStore;
 import org.jnfs.registry.auth.MysqlUserStore;
@@ -139,6 +140,17 @@ public class RegistryServer {
         Map<String, Object> storageConfig = (Map<String, Object>) config.getOrDefault("storage", Map.of());
         String storageMode = (String) storageConfig.getOrDefault("mode", "file");
 
+        // 把 storage 配置序列化并 AES 加密后注入 RegistryHandler，供 NameNode 启动时拉取（决策：Registry 为唯一配置源）
+        try {
+            byte[] plainPayload = serializeStorageConfig(storageConfig).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            byte[] cipherPayload = new SecurityUtil(org.jnfs.common.SecurityConfig.getAesKey()).encryptBytes(plainPayload);
+            RegistryHandler.setStorageConfigPayload(cipherPayload);
+            LOG.info("存储配置已加密发布到 RegistryHandler（mode={}）", storageMode);
+        } catch (Exception e) {
+            LOG.error("序列化/加密 storage 配置失败，拒绝启动", e);
+            System.exit(2);
+        }
+
         // mysql 模式：创建单一共享 DataSource（dashboard_user 表与冗余元数据表同库）
         // file 模式：不创建 DataSource（FileUserStore + 无冗余 API）
         com.zaxxer.hikari.HikariDataSource storageDataSource =
@@ -153,6 +165,34 @@ public class RegistryServer {
                 storageDataSource != null ? ", 冗余API: 已启用" : ", 冗余API: 未启用");
 
         new RegistryServer(port, dashboardPort, authManager, storageDataSource).run();
+    }
+
+    /**
+     * 将顶层 storage 配置序列化为管道分隔明文（供 NameNode 拉取）。
+     * <p>
+     * 格式：{@code mode|mysqlHost|mysqlPort|mysqlDatabase|mysqlUser|mysqlPassword}
+     * - file 模式：{@code file|||||}（后 5 字段空）
+     * - mysql 模式：{@code mysql|host|port|database|user|password}
+     * <p>
+     * 本方法只产出明文，由调用方负责 AES 加密后再发布；不输出密码日志。
+     *
+     * @param storageConfig 顶层 storage 配置段
+     * @return 明文 payload
+     */
+    @SuppressWarnings("unchecked")
+    private static String serializeStorageConfig(Map<String, Object> storageConfig) {
+        String mode = (String) storageConfig.getOrDefault("mode", "file");
+        if (!"mysql".equalsIgnoreCase(mode)) {
+            return "file|||||"; // file 模式：5 个空字段
+        }
+        Map<String, Object> mysql = (Map<String, Object>) storageConfig.getOrDefault("mysql", Map.of());
+        return String.join("|",
+                "mysql",
+                (String) mysql.getOrDefault("host", "localhost"),
+                String.valueOf(mysql.getOrDefault("port", 3306)),
+                (String) mysql.getOrDefault("database", "jnfs"),
+                (String) mysql.getOrDefault("user", "root"),
+                (String) mysql.getOrDefault("password", ""));
     }
 
     /**

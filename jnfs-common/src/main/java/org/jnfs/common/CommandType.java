@@ -76,6 +76,11 @@ public enum CommandType {
     /** 副本拉取触发指令 (NameNode -> target DataNode: 协调目标节点开始从 source 拉取 hash H) */
     DATA_REPLICA_PULL_CMD((byte) 44),
 
+    /** NameNode -> Registry: 启动时拉取存储模式与 MySQL 连接配置 */
+    REGISTRY_GET_STORAGE_CONFIG((byte) 45),
+    /** Registry -> NameNode: 响应存储配置（密文，AES-256-CTR + HMAC） */
+    REGISTRY_RESPONSE_STORAGE_CONFIG((byte) 46),
+
     /** 错误消息 */
     ERROR((byte) -1);
 

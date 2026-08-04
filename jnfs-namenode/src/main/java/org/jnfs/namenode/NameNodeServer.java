@@ -21,12 +21,14 @@ import org.jnfs.common.DaemonThreadFactory;
 import org.jnfs.common.DataDirResolver;
 import org.jnfs.common.HeartbeatSender;
 import org.jnfs.common.NetUtils;
+import org.jnfs.common.NettyClientBootstrap;
 import org.jnfs.common.NettyServerUtils;
 import org.jnfs.common.NodeAddressResolver;
 import org.jnfs.common.NodeIdManager;
 import org.jnfs.common.Packet;
 import org.jnfs.common.ServerShutdownHelper;
 import org.jnfs.common.SecurityConfig;
+import org.jnfs.common.SecurityUtil;
 import org.jnfs.common.migration.MigrationResult;
 import org.jnfs.common.migration.MigrationRunner;
 import org.jnfs.common.migration.StorageMode;
@@ -35,6 +37,7 @@ import org.jnfs.namenode.replication.ReplicationGroupStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.EventLoopGroup;
@@ -300,112 +303,111 @@ public class NameNodeServer {
         boolean cacheEnabled = true;
         long cacheMaxSize = 100000L;
 
-        if (config.containsKey("metadata")) {
-            Map<String, Object> metaConfig = (Map<String, Object>) config.get("metadata");
-            String mode = (String) metaConfig.getOrDefault("mode", "file");
-            StorageMode storageMode = StorageMode.fromConfig(mode);
+        // --- 从 Registry 拉取 storage 配置（决策：Registry 为唯一配置源，避免 namenode.yml 重复配置） ---
+        // 必须在迁移/MetadataManager 初始化之前完成；拉取失败则拒绝启动
+        LOG.info("从 Registry 拉取 storage 配置...");
+        StorageConfig storageCfg;
+        try {
+            storageCfg = fetchStorageConfigFromRegistry(registryAddresses);
+        } catch (Exception e) {
+            LOG.error("拉取 storage 配置失败，拒绝启动。原因: {}", e.getMessage());
+            System.exit(2);
+            return; // unreachable，仅为编译器满足
+        }
+        String mode = storageCfg.mode;
+        StorageMode storageMode = StorageMode.fromConfig(mode);
+        LOG.info("storage 模式: {}, mysql={}", mode,
+                "mysql".equalsIgnoreCase(mode)
+                        ? storageCfg.mysqlHost + ":" + storageCfg.mysqlPort + "/" + storageCfg.mysqlDatabase
+                        : "n/a");
 
-            // 读取缓存配置
-            if (metaConfig.containsKey("cache")) {
-                Map<String, Object> cacheConfig = (Map<String, Object>) metaConfig.get("cache");
-                cacheEnabled = (boolean) cacheConfig.getOrDefault("enabled", true);
-                Object maxSizeObj = cacheConfig.getOrDefault("max-size", 100000);
-                if (maxSizeObj instanceof Integer) {
-                    cacheMaxSize = ((Integer) maxSizeObj).longValue();
-                } else if (maxSizeObj instanceof Long) {
-                    cacheMaxSize = (Long) maxSizeObj;
-                }
+        // 读取缓存配置（本地 JVM 调优，从顶层 cache 段读取，与存储模式无关）
+        if (config.containsKey("cache")) {
+            Map<String, Object> cacheConfig = (Map<String, Object>) config.get("cache");
+            cacheEnabled = (boolean) cacheConfig.getOrDefault("enabled", true);
+            Object maxSizeObj = cacheConfig.getOrDefault("max-size", 100000);
+            if (maxSizeObj instanceof Integer) {
+                cacheMaxSize = ((Integer) maxSizeObj).longValue();
+            } else if (maxSizeObj instanceof Long) {
+                cacheMaxSize = (Long) maxSizeObj;
             }
+        }
 
-            if ("mysql".equalsIgnoreCase(mode)) {
-                LOG.info("使用 MySQL 元数据存储");
-                Map<String, Object> mysqlConfig = (Map<String, Object>) metaConfig.get("mysql");
-                String dbHost = (String) mysqlConfig.getOrDefault("host", "localhost");
-                int dbPort = (int) mysqlConfig.getOrDefault("port", 3306);
-                String dbName = (String) mysqlConfig.getOrDefault("database", "jnfs");
-                String user = (String) mysqlConfig.getOrDefault("user", "root");
-                String password = (String) mysqlConfig.getOrDefault("password", "");
+        if ("mysql".equalsIgnoreCase(mode)) {
+            LOG.info("使用 MySQL 元数据存储");
+            String dbHost = storageCfg.mysqlHost;
+            int dbPort = storageCfg.mysqlPort;
+            String dbName = storageCfg.mysqlDatabase;
+            String user = storageCfg.mysqlUser;
+            String password = storageCfg.mysqlPassword;
 
-                // 先运行迁移（必须在初始化 MetadataManager 之前）
-                com.zaxxer.hikari.HikariDataSource migrationDs = null;
-                try {
-                    com.zaxxer.hikari.HikariConfig hikariConfig = new com.zaxxer.hikari.HikariConfig();
-                    hikariConfig.setJdbcUrl("jdbc:mysql://" + dbHost + ":" + dbPort + "/" + dbName
-                            + "?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true");
-                    hikariConfig.setUsername(user);
-                    hikariConfig.setPassword(password);
-                    hikariConfig.setMaximumPoolSize(2);
-                    migrationDs = new com.zaxxer.hikari.HikariDataSource(hikariConfig);
+            // 先运行迁移（必须在初始化 MetadataManager 之前）
+            com.zaxxer.hikari.HikariDataSource migrationDs = null;
+            try {
+                com.zaxxer.hikari.HikariConfig hikariConfig = new com.zaxxer.hikari.HikariConfig();
+                hikariConfig.setJdbcUrl("jdbc:mysql://" + dbHost + ":" + dbPort + "/" + dbName
+                        + "?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true");
+                hikariConfig.setUsername(user);
+                hikariConfig.setPassword(password);
+                hikariConfig.setMaximumPoolSize(2);
+                migrationDs = new com.zaxxer.hikari.HikariDataSource(hikariConfig);
 
-                    MigrationResult migrationResult = MigrationRunner.run(storageMode, null, migrationDs);
-                    if (migrationResult.isFailed()) {
-                        LOG.error("数据迁移失败，拒绝启动。原因: {}", migrationResult.getMessage());
-                        System.exit(2);
-                    }
-                    LOG.info("数据迁移: {}", migrationResult.getMessage());
-                } finally {
-                    if (migrationDs != null) {
-                        migrationDs.close();
-                    }
-                }
-
-                metadataManager = new MySQLMetadataManager(dbHost, dbPort, dbName, user, password);
-
-                // --- file → mysql 自动导入（单机转分布式场景） ---
-                // 若存在 file 模式历史日志, 先规整为 V1(稳定 storageId), 再导入 mysql
-                File logFile = new File(dataDir, MigrationRunner.METADATA_LOG_FILE);
-                if (logFile.exists()) {
-                    MigrationResult fileMigration = MigrationRunner.run(StorageMode.FILE, dataDir, null);
-                    if (fileMigration.isFailed()) {
-                        LOG.error("file 日志迁移失败，拒绝启动。原因: {}", fileMigration.getMessage());
-                        System.exit(2);
-                    }
-                    try {
-                        FileToMysqlImporter.importIfApplicable(
-                                dataDir, ((MySQLMetadataManager) metadataManager).getDataSource());
-                    } catch (Exception e) {
-                        LOG.error("file→mysql 自动导入失败，拒绝启动。原因: {}", e.getMessage(), e);
-                        System.exit(2);
-                    }
-                }
-
-                // 冗余组配置缓存（mysql 模式专用，决策 9：NameNode 定期从 mysql 加载冗余组定义）
-                replicationGroupStore = new ReplicationGroupStore(
-                        ((MySQLMetadataManager) metadataManager).getDataSource());
-                replicationGroupStore.start();
-                LOG.info("冗余组配置缓存已启动（mysql 模式，多副本启用）");
-
-                // 对账同步调度器（mysql 模式专用，决策 10：任务持久化 + 启动恢复）
-                // 复用 workerGroup 需要在此处创建，但 NameNodeServer 构造函数中才初始化 workerGroup。
-                // 此处先传 null，在 NameNodeServer 构造后由 run() 启动。
-                // 替代方案：直接在构造前创建 EventLoopGroup 传给 scheduler。
-                io.netty.channel.EventLoopGroup syncWorkerGroup = new io.netty.channel.nio.NioEventLoopGroup();
-                replicaSyncScheduler = new org.jnfs.namenode.replication.ReplicaSyncScheduler(
-                        ((MySQLMetadataManager) metadataManager).getDataSource(),
-                        replicationGroupStore,
-                        advertisedHost, port,
-                        syncWorkerGroup,
-                        null);   // 默认策略
-                replicaSyncScheduler.start();
-                LOG.info("对账同步调度器已启动（mysql 模式）");
-            } else {
-                LOG.info("使用本地文件元数据存储");
-
-                // 运行迁移（在创建 MetadataManager 之前，因为迁移会修改日志文件）
-                MigrationResult migrationResult = MigrationRunner.run(storageMode, dataDir, null);
+                MigrationResult migrationResult = MigrationRunner.run(storageMode, null, migrationDs);
                 if (migrationResult.isFailed()) {
                     LOG.error("数据迁移失败，拒绝启动。原因: {}", migrationResult.getMessage());
                     System.exit(2);
                 }
                 LOG.info("数据迁移: {}", migrationResult.getMessage());
-
-                metadataManager = new MetadataManager();
+            } finally {
+                if (migrationDs != null) {
+                    migrationDs.close();
+                }
             }
-        } else {
-            LOG.info("默认使用本地文件元数据存储");
 
-            // 运行迁移
-            MigrationResult migrationResult = MigrationRunner.run(StorageMode.FILE, dataDir, null);
+            metadataManager = new MySQLMetadataManager(dbHost, dbPort, dbName, user, password);
+
+            // --- file → mysql 自动导入（单机转分布式场景） ---
+            // 若存在 file 模式历史日志, 先规整为 V1(稳定 storageId), 再导入 mysql
+            File logFile = new File(dataDir, MigrationRunner.METADATA_LOG_FILE);
+            if (logFile.exists()) {
+                MigrationResult fileMigration = MigrationRunner.run(StorageMode.FILE, dataDir, null);
+                if (fileMigration.isFailed()) {
+                    LOG.error("file 日志迁移失败，拒绝启动。原因: {}", fileMigration.getMessage());
+                    System.exit(2);
+                }
+                try {
+                    FileToMysqlImporter.importIfApplicable(
+                            dataDir, ((MySQLMetadataManager) metadataManager).getDataSource());
+                } catch (Exception e) {
+                    LOG.error("file→mysql 自动导入失败，拒绝启动。原因: {}", e.getMessage(), e);
+                    System.exit(2);
+                }
+            }
+
+            // 冗余组配置缓存（mysql 模式专用，决策 9：NameNode 定期从 mysql 加载冗余组定义）
+            replicationGroupStore = new ReplicationGroupStore(
+                    ((MySQLMetadataManager) metadataManager).getDataSource());
+            replicationGroupStore.start();
+            LOG.info("冗余组配置缓存已启动（mysql 模式，多副本启用）");
+
+            // 对账同步调度器（mysql 模式专用，决策 10：任务持久化 + 启动恢复）
+            // 复用 workerGroup 需要在此处创建，但 NameNodeServer 构造函数中才初始化 workerGroup。
+            // 此处先传 null，在 NameNodeServer 构造后由 run() 启动。
+            // 替代方案：直接在构造前创建 EventLoopGroup 传给 scheduler。
+            io.netty.channel.EventLoopGroup syncWorkerGroup = new io.netty.channel.nio.NioEventLoopGroup();
+            replicaSyncScheduler = new org.jnfs.namenode.replication.ReplicaSyncScheduler(
+                    ((MySQLMetadataManager) metadataManager).getDataSource(),
+                    replicationGroupStore,
+                    advertisedHost, port,
+                    syncWorkerGroup,
+                    null);   // 默认策略
+            replicaSyncScheduler.start();
+            LOG.info("对账同步调度器已启动（mysql 模式）");
+        } else {
+            LOG.info("使用本地文件元数据存储");
+
+            // 运行迁移（在创建 MetadataManager 之前，因为迁移会修改日志文件）
+            MigrationResult migrationResult = MigrationRunner.run(storageMode, dataDir, null);
             if (migrationResult.isFailed()) {
                 LOG.error("数据迁移失败，拒绝启动。原因: {}", migrationResult.getMessage());
                 System.exit(2);
@@ -434,6 +436,52 @@ public class NameNodeServer {
 
         new NameNodeServer(port, advertisedHost, nodeId, registryAddresses,
                 replicationGroupStore, replicaSyncScheduler).run();
+    }
+
+    /**
+     * 启动期一次性从 Registry 拉取 storage 配置（AES 加密传输）。
+     * <p>
+     * 多地址 failover：任一 Registry 成功即返回；全部失败抛异常，调用方负责拒绝启动。
+     * 解密失败（HMAC 校验不通过 / 密钥不匹配）也会抛异常，安全失败。
+     *
+     * @param addresses Registry 地址列表
+     * @return 解析后的 StorageConfig
+     */
+    private static StorageConfig fetchStorageConfigFromRegistry(List<InetSocketAddress> addresses) {
+        NioEventLoopGroup group = new NioEventLoopGroup();
+        try {
+            for (InetSocketAddress addr : addresses) {
+                try {
+                    Bootstrap b = NettyClientBootstrap.createWithHandler(group,
+                            new StorageConfigFetchHandler());
+                    Channel ch = NettyClientBootstrap.connectSync(b,
+                            addr.getHostString(), addr.getPort(), 6000);
+                    try {
+                        Packet req = new Packet();
+                        req.setCommandType(CommandType.REGISTRY_GET_STORAGE_CONFIG);
+                        req.setToken(Constants.getValidToken());
+                        ch.writeAndFlush(req);
+
+                        Packet resp = StorageConfigFetchHandler.waitResponse(5000);
+                        if (resp != null
+                                && resp.getCommandType() == CommandType.REGISTRY_RESPONSE_STORAGE_CONFIG) {
+                            byte[] plain = new SecurityUtil(SecurityConfig.getAesKey())
+                                    .decryptBytes(resp.getData());
+                            return StorageConfig.parse(new String(plain, StandardCharsets.UTF_8));
+                        }
+                        LOG.warn("Registry ({}) 返回异常响应: {}",
+                                addr, resp != null ? resp.getCommandType() : "null");
+                    } finally {
+                        ch.close().sync();
+                    }
+                } catch (Exception e) {
+                    LOG.warn("从 Registry 拉取 storage 配置失败 ({}): {}", addr, e.getMessage());
+                }
+            }
+            throw new RuntimeException("所有 Registry 地址均不可达，无法拉取 storage 配置");
+        } finally {
+            group.shutdownGracefully();
+        }
     }
 
     // --- 内部 Discovery Handler ---
@@ -472,6 +520,81 @@ public class NameNodeServer {
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
             promise.completeExceptionally(cause);
             // 发生异常时可以关闭连接，Pool 会检测到
+            ctx.close();
+        }
+    }
+
+    /**
+     * 从 Registry 拉取的存储配置（值对象，不可变）。
+     */
+    private static final class StorageConfig {
+        final String mode;          // "file" | "mysql"
+        final String mysqlHost;
+        final int mysqlPort;
+        final String mysqlDatabase;
+        final String mysqlUser;
+        final String mysqlPassword;
+
+        StorageConfig(String mode, String mysqlHost, int mysqlPort, String mysqlDatabase,
+                      String mysqlUser, String mysqlPassword) {
+            this.mode = mode;
+            this.mysqlHost = mysqlHost;
+            this.mysqlPort = mysqlPort;
+            this.mysqlDatabase = mysqlDatabase;
+            this.mysqlUser = mysqlUser;
+            this.mysqlPassword = mysqlPassword;
+        }
+
+        /**
+         * 解析管道分隔 payload：{@code mode|mysqlHost|mysqlPort|mysqlDatabase|mysqlUser|mysqlPassword}
+         * file 模式 payload 为 {@code file|||||}（后 5 字段空）。
+         */
+        static StorageConfig parse(String payload) {
+            String[] parts = payload.split("\\|");
+            String mode = parts[0];
+            if (!"mysql".equalsIgnoreCase(mode)) {
+                return new StorageConfig(mode, null, 0, null, null, null);
+            }
+            String host = parts.length > 1 ? parts[1] : "localhost";
+            int port = parts.length > 2 ? parseIntSafe(parts[2], 3306) : 3306;
+            String db = parts.length > 3 ? parts[3] : "jnfs";
+            String user = parts.length > 4 ? parts[4] : "root";
+            String password = parts.length > 5 ? parts[5] : "";
+            return new StorageConfig(mode, host, port, db, user, password);
+        }
+
+        private static int parseIntSafe(String s, int def) {
+            try {
+                return Integer.parseInt(s);
+            } catch (NumberFormatException e) {
+                return def;
+            }
+        }
+    }
+
+    /**
+     * 启动期拉取 storage 配置的临时 Handler，用 CompletableFuture 同步等待响应。
+     * 仅在 main() 单线程下触发一次，PROMISE 单次使用，无并发问题。
+     */
+    private static class StorageConfigFetchHandler extends SimpleChannelInboundHandler<Packet> {
+
+        private static final CompletableFuture<Packet> PROMISE = new CompletableFuture<>();
+
+        static Packet waitResponse(long timeoutMs) throws Exception {
+            return PROMISE.get(timeoutMs, TimeUnit.MILLISECONDS);
+        }
+
+        @Override
+        protected void channelRead0(ChannelHandlerContext ctx, Packet packet) {
+            if (packet.getCommandType() == CommandType.REGISTRY_RESPONSE_STORAGE_CONFIG
+                    || packet.getCommandType() == CommandType.ERROR) {
+                PROMISE.complete(packet);
+            }
+        }
+
+        @Override
+        public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+            PROMISE.completeExceptionally(cause);
             ctx.close();
         }
     }
