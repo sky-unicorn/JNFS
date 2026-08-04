@@ -43,6 +43,19 @@ heartbeat:
   # 超过此时间未收到心跳，将自动剔除 DataNode/NameNode
   timeout_ms: 30000
 
+# --- 元数据库配置（决策 9：Registry 连元数据库读写冗余组/策略/任务表） ---
+# 未配置此段时，冗余存储管理 API 不可用（/api/replication/* 返回 404）
+# 仅 mysql 模式启用（file 模式单机无冗余）
+# 注意：此数据库指向 NameNode 所用的元数据库（jnfs schema），与 dashboard.auth.storage 的 jnfs_registry 用户库分离
+metadata:
+  mode: mysql                    # mysql | file（file 模式不启用冗余 API）
+  mysql:
+    host: localhost
+    port: 3306
+    database: jnfs               # NameNode 元数据库名
+    user: jnfs
+    password: ""                  # 建议通过外部 conf/registry.yml 配置，勿提交明文
+
 # --- 安全配置 ---
 security:
   # 通信令牌 (服务间鉴权密钥，所有节点必须一致)

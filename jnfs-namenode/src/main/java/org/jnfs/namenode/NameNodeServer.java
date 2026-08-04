@@ -31,6 +31,7 @@ import org.jnfs.common.migration.MigrationResult;
 import org.jnfs.common.migration.MigrationRunner;
 import org.jnfs.common.migration.StorageMode;
 import org.jnfs.namenode.migration.FileToMysqlImporter;
+import org.jnfs.namenode.replication.ReplicationGroupStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -75,11 +76,21 @@ public class NameNodeServer {
     private final ScheduledExecutorService heartbeatScheduler;
     private final ScheduledExecutorService discoveryScheduler;
 
-    public NameNodeServer(int port, String advertisedHost, String nodeId, List<InetSocketAddress> registryAddresses) {
+    // 冗余组配置缓存（mysql 模式专用，file 模式为 null）
+    private final ReplicationGroupStore replicationGroupStore;
+
+    // 夜间对账同步调度器（mysql 模式专用，file 模式为 null）
+    private final org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler;
+
+    public NameNodeServer(int port, String advertisedHost, String nodeId, List<InetSocketAddress> registryAddresses,
+                          ReplicationGroupStore replicationGroupStore,
+                          org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler) {
         this.port = port;
         this.advertisedHost = advertisedHost;
         this.nodeId = nodeId;
         this.registryAddresses = registryAddresses;
+        this.replicationGroupStore = replicationGroupStore;
+        this.replicaSyncScheduler = replicaSyncScheduler;
 
         // 初始化共享的 Worker Group
         this.workerGroup = new NioEventLoopGroup();
@@ -96,6 +107,9 @@ public class NameNodeServer {
 
     // 运行标志
     private final AtomicBoolean running = new AtomicBoolean(true);
+
+    /** I1 修复：首次 discovery 是否已完成（volatile 跨线程可见） */
+    private volatile boolean firstDiscoveryDone = false;
 
     public void run() throws Exception {
         // 启动后台线程定期从注册中心拉取 DataNode 列表
@@ -130,6 +144,22 @@ public class NameNodeServer {
      * 统一的资源释放方法，支持幂等调用
      */
     private void shutdown() {
+        // 关闭对账同步调度器（mysql 模式）
+        if (replicaSyncScheduler != null) {
+            try {
+                replicaSyncScheduler.shutdown();
+            } catch (Exception e) {
+                LOG.warn("关闭 ReplicaSyncScheduler 失败", e);
+            }
+        }
+        // 关闭冗余组缓存刷新调度器（mysql 模式）
+        if (replicationGroupStore != null) {
+            try {
+                replicationGroupStore.shutdown();
+            } catch (Exception e) {
+                LOG.warn("关闭 ReplicationGroupStore 失败", e);
+            }
+        }
         ServerShutdownHelper.shutdownAll(LOG, "NameNodeServer", running,
                 new ScheduledExecutorService[]{heartbeatScheduler, discoveryScheduler},
                 registryPoolMap, workerGroup);
@@ -194,6 +224,23 @@ public class NameNodeServer {
                 // 等待结果
                 try {
                     promise.get(5, TimeUnit.SECONDS);
+                    // I1 修复：首次 discovery 成功且映射已建立后，触发对账 startup-recovery。
+                    // 此刻 NodeAddressResolver 映射就绪，resolveNodeAddress 可正常解析。
+                    // 用独立 daemon 线程跑，避免阻塞 discovery 调度线程（dispatchTasks 内含 semaphore.acquire）。
+                    if (!firstDiscoveryDone) {
+                        firstDiscoveryDone = true;
+                        if (replicaSyncScheduler != null) {
+                            Thread t = new Thread(() -> {
+                                try {
+                                    replicaSyncScheduler.runStartupRecovery();
+                                } catch (Exception e) {
+                                    LOG.warn("runStartupRecovery 异常", e);
+                                }
+                            }, "ReplicaSync-StartupRecovery");
+                            t.setDaemon(true);
+                            t.start();
+                        }
+                    }
                     // 成功获取，退出循环
                     return;
                 } catch (TimeoutException e) {
@@ -242,6 +289,12 @@ public class NameNodeServer {
 
         // --- 初始化 MetadataManager ---
         MetadataManager metadataManager = null;
+
+        // 冗余组配置缓存（mysql 模式构造，file 模式保持 null）
+        ReplicationGroupStore replicationGroupStore = null;
+
+        // 对账同步调度器（mysql 模式构造，file 模式保持 null）
+        org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler = null;
 
         // 缓存配置默认值
         boolean cacheEnabled = true;
@@ -315,6 +368,26 @@ public class NameNodeServer {
                         System.exit(2);
                     }
                 }
+
+                // 冗余组配置缓存（mysql 模式专用，决策 9：NameNode 定期从 mysql 加载冗余组定义）
+                replicationGroupStore = new ReplicationGroupStore(
+                        ((MySQLMetadataManager) metadataManager).getDataSource());
+                replicationGroupStore.start();
+                LOG.info("冗余组配置缓存已启动（mysql 模式，多副本启用）");
+
+                // 对账同步调度器（mysql 模式专用，决策 10：任务持久化 + 启动恢复）
+                // 复用 workerGroup 需要在此处创建，但 NameNodeServer 构造函数中才初始化 workerGroup。
+                // 此处先传 null，在 NameNodeServer 构造后由 run() 启动。
+                // 替代方案：直接在构造前创建 EventLoopGroup 传给 scheduler。
+                io.netty.channel.EventLoopGroup syncWorkerGroup = new io.netty.channel.nio.NioEventLoopGroup();
+                replicaSyncScheduler = new org.jnfs.namenode.replication.ReplicaSyncScheduler(
+                        ((MySQLMetadataManager) metadataManager).getDataSource(),
+                        replicationGroupStore,
+                        advertisedHost, port,
+                        syncWorkerGroup,
+                        null);   // 默认策略
+                replicaSyncScheduler.start();
+                LOG.info("对账同步调度器已启动（mysql 模式）");
             } else {
                 LOG.info("使用本地文件元数据存储");
 
@@ -353,7 +426,14 @@ public class NameNodeServer {
             System.exit(2);
         }
 
-        new NameNodeServer(port, advertisedHost, nodeId, registryAddresses).run();
+        // 注入冗余组配置缓存到 Handler
+        NameNodeHandler.initReplicationGroupStore(replicationGroupStore);
+
+        // 注入对账同步调度器到 Handler（DATA_REPLICA_COMMIT 登记时使用）
+        NameNodeHandler.initReplicaSyncScheduler(replicaSyncScheduler);
+
+        new NameNodeServer(port, advertisedHost, nodeId, registryAddresses,
+                replicationGroupStore, replicaSyncScheduler).run();
     }
 
     // --- 内部 Discovery Handler ---

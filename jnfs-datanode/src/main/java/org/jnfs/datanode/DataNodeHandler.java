@@ -3,6 +3,7 @@ package org.jnfs.datanode;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.DefaultFileRegion;
+import io.netty.channel.EventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.NettyHandlerHelper;
@@ -18,6 +19,7 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 
 /**
  * DataNode 业务处理器
@@ -33,6 +35,13 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
     private final List<String> storagePaths;
 
+    // 副本拉取共享资源（由 DataNodeServer 注入，所有连接实例共享同一批）
+    // null 表示不支持跨节点副本拉取（向后兼容）
+    private final ExecutorService pullExecutor;
+    private final EventLoopGroup outboundWorkerGroup;
+    private final long pullRateLimitBytesPerSec;
+    private final String nodeId;
+
     // 当前正在接收的文件写入通道
     private FileChannel currentFileChannel;
     // 当前文件输出流
@@ -46,8 +55,32 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     // 已接收字节数
     private long receivedBytes;
 
+    /**
+     * 兼容旧构造函数（不支持副本拉取）
+     */
     public DataNodeHandler(List<String> storagePaths) {
+        this(storagePaths, null, null, 0L, null);
+    }
+
+    /**
+     * 完整构造函数（注入副本拉取共享资源）
+     *
+     * @param storagePaths          本地存储路径列表
+     * @param pullExecutor          后台拉取线程池（所有连接共享）
+     * @param outboundWorkerGroup   出站连接共享 EventLoopGroup（拉取/COMMIT 用）
+     * @param pullRateLimitBytesPerSec 拉取限速（字节/秒，0 表示用默认值）
+     * @param nodeId                本节点 ID（COMMIT payload 需含 nodeId）
+     */
+    public DataNodeHandler(List<String> storagePaths,
+                           ExecutorService pullExecutor,
+                           EventLoopGroup outboundWorkerGroup,
+                           long pullRateLimitBytesPerSec,
+                           String nodeId) {
         this.storagePaths = storagePaths;
+        this.pullExecutor = pullExecutor;
+        this.outboundWorkerGroup = outboundWorkerGroup;
+        this.pullRateLimitBytesPerSec = pullRateLimitBytesPerSec;
+        this.nodeId = nodeId;
     }
 
     @Override
@@ -72,6 +105,12 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
             initiateUpload(ctx, packet);
         } else if (packet.getCommandType() == CommandType.DOWNLOAD_REQUEST) {
             handleDownload(ctx, packet);
+        } else if (packet.getCommandType() == CommandType.DATA_REPLICA_PULL_REQUEST) {
+            // 源侧：被其他 DataNode 拉取（步骤 4）
+            handleReplicaPullRequest(ctx, packet);
+        } else if (packet.getCommandType() == CommandType.DATA_REPLICA_PULL_CMD) {
+            // 目标侧：NameNode 协调本节点开始拉取（步骤 1-2）
+            handleReplicaPullCmd(ctx, packet);
         }
     }
 
@@ -136,7 +175,8 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
     }
 
     // 使用通用工具类提供分段锁
-    private static final SegmentedLocks LOCKS = new SegmentedLocks(128);
+    // 包级私有：ReplicaPullWorker 复用同一实例，使上传(finishUpload)与拉取(finishPull)同 hash 互斥
+    static final SegmentedLocks LOCKS = new SegmentedLocks(128);
 
     private void finishUpload(ChannelHandlerContext ctx) {
         closeCurrentFile();
@@ -221,6 +261,120 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
         DefaultFileRegion region = new DefaultFileRegion(file, 0, fileLength);
         ctx.writeAndFlush(region);
+    }
+
+    // ==================== 副本拉取相关（源侧） ====================
+
+    /**
+     * 源侧：处理其他 DataNode 发来的 DATA_REPLICA_PULL_REQUEST
+     * 步骤 4：按 hash 找文件，回 DATA_REPLICA_PULL_RESPONSE（含 fileLength）+ 流式发送密文
+     * 仿 handleDownload，但响应命令为 DATA_REPLICA_PULL_RESPONSE
+     */
+    private void handleReplicaPullRequest(ChannelHandlerContext ctx, Packet packet) {
+        String fileHash = new String(packet.getData(), StandardCharsets.UTF_8);
+
+        File file;
+        try {
+            file = getStorageFile(fileHash);
+        } catch (IOException e) {
+            NettyHandlerHelper.sendError(ctx, "非法的文件名: " + e.getMessage());
+            return;
+        }
+
+        if (!file.exists()) {
+            LOG.warn("[Pull] 源侧文件不存在: {}", fileHash);
+            NettyHandlerHelper.sendError(ctx, "文件不存在");
+            return;
+        }
+
+        LOG.info("[Pull] 源侧开始发送副本: {}, size={}", fileHash, file.length());
+
+        long fileLength = file.length();
+        Packet response = new Packet();
+        response.setCommandType(CommandType.DATA_REPLICA_PULL_RESPONSE);
+        response.setData(String.valueOf(fileLength).getBytes(StandardCharsets.UTF_8));
+        response.setStreamLength(fileLength); // 设置流长度，让目标端 PacketDecoder 正确进入流式模式
+        ctx.write(response);
+
+        DefaultFileRegion region = new DefaultFileRegion(file, 0, fileLength);
+        ctx.writeAndFlush(region);
+    }
+
+    // ==================== 副本拉取相关（目标侧） ====================
+
+    /**
+     * 目标侧：处理 NameNode 发来的 DATA_REPLICA_PULL_CMD
+     * 步骤 1-2：解析 payload → 派发到后台拉取线程 → 立即 ACK
+     *
+     * payload 格式: fileHash|sourceHost:port|namenodeHost:port
+     */
+    private void handleReplicaPullCmd(ChannelHandlerContext ctx, Packet packet) {
+        if (pullExecutor == null || outboundWorkerGroup == null) {
+            NettyHandlerHelper.sendError(ctx, "本节点未启用副本拉取能力");
+            return;
+        }
+
+        String payload = new String(packet.getData(), StandardCharsets.UTF_8);
+        // 三段 | 分隔
+        String[] parts = payload.split("\\|", -1);
+        if (parts.length != 3) {
+            NettyHandlerHelper.sendError(ctx, "非法的 PULL_CMD payload 格式");
+            return;
+        }
+
+        String fileHash = parts[0].trim();
+        String[] sourceAddr = parseHostPort(parts[1].trim(), "source");
+        String[] namenodeAddr = parseHostPort(parts[2].trim(), "namenode");
+        if (sourceAddr == null || namenodeAddr == null) {
+            NettyHandlerHelper.sendError(ctx, "非法的 PULL_CMD 地址格式");
+            return;
+        }
+
+        // 校验 hash 格式（防止注入非法字符构造路径）
+        if (!fileHash.matches("^[a-zA-Z0-9]+$")) {
+            NettyHandlerHelper.sendError(ctx, "非法的 fileHash");
+            return;
+        }
+
+        // 构造拉取任务（先 submit 成功再 ACK，避免 NameNode 误以为任务已接受但实际丢失）
+        ReplicaPullWorker worker = new ReplicaPullWorker(
+                fileHash,
+                nodeId,
+                sourceAddr[0], Integer.parseInt(sourceAddr[1]),
+                namenodeAddr[0], Integer.parseInt(namenodeAddr[1]),
+                storagePaths,
+                outboundWorkerGroup,
+                pullRateLimitBytesPerSec);
+        try {
+            pullExecutor.submit(worker);
+            // submit 成功后才 ACK（用 UPLOAD_RESPONSE 作为通用成功包，Phase 5 只关心不是 ERROR）
+            NettyHandlerHelper.sendResponse(ctx, CommandType.UPLOAD_RESPONSE,
+                    ("PULL_ACCEPTED: " + fileHash).getBytes(StandardCharsets.UTF_8));
+            LOG.info("[Pull] 已派发拉取任务: hash={}, source={}:{}, namenode={}:{}",
+                    fileHash, sourceAddr[0], sourceAddr[1], namenodeAddr[0], namenodeAddr[1]);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            // submit 失败（池满/已关闭）→ ACK ERROR，NameNode 可立即重试或等下一轮对账
+            LOG.warn("[Pull] 拉取任务被拒绝（池满/关闭）: hash={}", fileHash);
+            NettyHandlerHelper.sendError(ctx, "拉取任务被拒绝，请重试");
+        }
+    }
+
+    /**
+     * 解析 host:port 字符串，返回 [host, port] 或 null（格式非法）
+     */
+    private String[] parseHostPort(String addr, String label) {
+        int colon = addr.lastIndexOf(':');
+        if (colon <= 0 || colon >= addr.length() - 1) {
+            LOG.warn("[Pull] 非法的 {} 地址格式: {}", label, addr);
+            return null;
+        }
+        try {
+            String host = addr.substring(0, colon);
+            String port = addr.substring(colon + 1);
+            return new String[]{host, port};
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**

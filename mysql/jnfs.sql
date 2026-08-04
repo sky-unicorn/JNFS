@@ -11,7 +11,7 @@
  Target Server Version : 80020
  File Encoding         : 65001
 
- Date: 05/01/2026 14:35:49
+ Date: 04/08/2026 (V3 schema — 冗余存储 + Dashboard 策略/控制)
 */
 
 SET NAMES utf8mb4;
@@ -26,6 +26,11 @@ CREATE TABLE `schema_version` (
   `upgraded_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '升级时间',
   PRIMARY KEY (`version`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='schema 版本记录';
+
+-- ----------------------------
+-- Records of schema_version (V3)
+-- ----------------------------
+INSERT INTO `schema_version` VALUES (3, NOW());
 
 -- ----------------------------
 -- Table structure for node_registry
@@ -51,11 +56,13 @@ CREATE TABLE `file_location`  (
   `file_hash` char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '关联 file_metadata.file_hash',
   `datanode_id` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'DataNode节点ID (关联 node_registry.node_id)',
   `datanode_addr` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT 'DataNode地址 (host:port, 兼容旧数据)',
-  `status` tinyint NULL DEFAULT 1 COMMENT '状态: 1-正常, 0-损坏',
+  `status` tinyint NOT NULL DEFAULT 1 COMMENT '状态: 1-正常(ACTIVE), 0-损坏(CORRUPT)',
+  `replica_role` tinyint NOT NULL DEFAULT 0 COMMENT '0=PRIMARY,1=SECONDARY',
   `create_time` datetime(0) NULL DEFAULT CURRENT_TIMESTAMP(0),
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `uk_hash_node`(`file_hash`, `datanode_id`) USING BTREE,
-  INDEX `idx_node`(`datanode_id`) USING BTREE
+  INDEX `idx_node`(`datanode_id`) USING BTREE,
+  INDEX `idx_hash_status`(`file_hash`, `status`) USING BTREE
 ) ENGINE = InnoDB AUTO_INCREMENT = 3 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '文件存储位置映射表' ROW_FORMAT = Dynamic;
 
 -- ----------------------------
@@ -71,12 +78,17 @@ CREATE TABLE `file_metadata`  (
   `filename` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '原始文件名',
   `file_hash` char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '文件哈希 (SHA-256)',
   `file_size` bigint NULL DEFAULT 0 COMMENT '文件大小 (字节)',
+  `replication_factor` tinyint NOT NULL DEFAULT 1 COMMENT '目标副本数；1=单副本，2/3=组内节点数',
   `create_time` datetime(0) NULL DEFAULT CURRENT_TIMESTAMP(0) COMMENT '创建时间',
   `update_time` datetime(0) NULL DEFAULT CURRENT_TIMESTAMP(0) ON UPDATE CURRENT_TIMESTAMP(0),
   PRIMARY KEY (`storage_id`) USING BTREE,
   INDEX `idx_hash`(`file_hash`) USING BTREE,
   INDEX `idx_filename`(`filename`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT = '文件元数据表' ROW_FORMAT = Dynamic;
+
+-- ----------------------------
+-- Records of file_metadata
+-- ----------------------------
 
 -- ----------------------------
 -- Table structure for file_upload_lock
@@ -91,8 +103,72 @@ CREATE TABLE `file_upload_lock` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件上传分布式锁表';
 
 -- ----------------------------
--- Records of file_metadata
+-- Table structure for replication_group
 -- ----------------------------
+DROP TABLE IF EXISTS `replication_group`;
+CREATE TABLE `replication_group` (
+  `group_id` varchar(64) NOT NULL COMMENT '组ID',
+  `group_name` varchar(128) NOT NULL COMMENT '组名',
+  `node_ids` varchar(512) NOT NULL COMMENT '组成员node_id列表,逗号分隔(2~3个)',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`group_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='冗余组配置表';
+
+-- ----------------------------
+-- Table structure for replica_sync_task
+-- ----------------------------
+DROP TABLE IF EXISTS `replica_sync_task`;
+CREATE TABLE `replica_sync_task` (
+  `task_id` varchar(64) NOT NULL COMMENT '任务ID',
+  `file_hash` char(64) NOT NULL COMMENT '文件hash',
+  `source_node` varchar(128) NOT NULL COMMENT '源节点(primary)',
+  `target_node` varchar(128) NOT NULL COMMENT '目标节点',
+  `status` tinyint NOT NULL DEFAULT 0 COMMENT '0=PENDING,1=IN_FLIGHT,2=DONE,3=FAILED',
+  `retry_count` tinyint NOT NULL DEFAULT 0 COMMENT '累计失败次数(达4告警)',
+  `file_size` bigint NOT NULL DEFAULT 0 COMMENT '文件大小(字节,用于限速与超时)',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`task_id`),
+  UNIQUE KEY `uk_hash_target` (`file_hash`, `target_node`),
+  INDEX `idx_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='对账同步任务表';
+
+-- ----------------------------
+-- Table structure for replication_policy
+-- ----------------------------
+DROP TABLE IF EXISTS `replication_policy`;
+CREATE TABLE `replication_policy` (
+  `id` tinyint NOT NULL DEFAULT 1,
+  `sync_window_start` varchar(5) NOT NULL DEFAULT '01:00',
+  `sync_window_end` varchar(5) NOT NULL DEFAULT '03:00',
+  `soft_deadline` varchar(5) NOT NULL DEFAULT '03:00',
+  `rate_limit_mbps` int NOT NULL DEFAULT 50,
+  `max_concurrency` int NOT NULL DEFAULT 4,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='同步策略配置';
+
+-- ----------------------------
+-- Records of replication_policy (seed row)
+-- ----------------------------
+INSERT IGNORE INTO `replication_policy` (`id`) VALUES (1);
+
+-- ----------------------------
+-- Table structure for replication_control
+-- ----------------------------
+DROP TABLE IF EXISTS `replication_control`;
+CREATE TABLE `replication_control` (
+  `id` tinyint NOT NULL DEFAULT 1,
+  `manual_sync_requested` tinyint NOT NULL DEFAULT 0,
+  `requested_at` datetime NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='对账控制信号';
+
+-- ----------------------------
+-- Records of replication_control (seed row)
+-- ----------------------------
+INSERT IGNORE INTO `replication_control` (`id`) VALUES (1);
 
 -- ----------------------------
 -- Registry Dashboard 鉴权用户表

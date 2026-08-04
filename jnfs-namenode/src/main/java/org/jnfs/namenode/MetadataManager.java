@@ -2,12 +2,14 @@ package org.jnfs.namenode;
 
 import org.jnfs.common.DataDirResolver;
 import org.jnfs.common.NodeAddressResolver;
+import org.jnfs.common.replication.ReplicaRole;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -95,9 +97,25 @@ public class MetadataManager {
 
     /**
      * 持久化记录一条新文件元数据
+     * <p>
+     * File 模式单副本短路（§5.2）：冗余仅限 mysql 集群模式，file 模式不启用冗余。
+     * WAL 行格式保持 V1（{@code ADD|filename|hash|node_id|storageId}），只写 primary 一份。
+     * replicationFactor 和 locations 参数由 mysql 模式使用，file 模式忽略。
+     *
+     * @param filename         文件名
+     * @param hash             文件哈希
+     * @param storageId        存储ID
+     * @param replicationFactor 目标副本数（file 模式忽略，恒为 1）
+     * @param locations        副本位置列表（file 模式只取 primary 的 nodeId）
      */
-    public synchronized void logAddFile(String filename, String hash, String address, String storageId) throws IOException {
-        String record = String.format("ADD|%s|%s|%s|%s", filename, hash, address, storageId);
+    public synchronized void logAddFile(String filename, String hash, String storageId,
+                                        int replicationFactor, List<ReplicaLocation> locations) throws IOException {
+        if (locations == null || locations.isEmpty()) {
+            throw new IllegalArgumentException("logAddFile requires at least one replica location");
+        }
+        // File 模式：只取 primary 的 nodeId 写入 WAL（单副本）
+        String nodeId = locations.get(0).getNodeId();
+        String record = String.format("ADD|%s|%s|%s|%s", filename, hash, nodeId, storageId);
 
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(logFile, true))) {
             writer.write(record);

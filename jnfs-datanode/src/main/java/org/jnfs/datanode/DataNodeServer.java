@@ -13,6 +13,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -71,6 +72,9 @@ public class DataNodeServer {
     private final ScheduledExecutorService heartbeatScheduler;
     private final ScheduledExecutorService gcScheduler;
 
+    // 副本拉取后台线程池（所有连接共享，用于跨节点副本拉取）
+    private final ExecutorService pullExecutor;
+
     public DataNodeServer(int port, String advertisedHost, String nodeId, List<String> storagePaths, List<InetSocketAddress> registryAddresses) {
         this.port = port;
         this.advertisedHost = advertisedHost;
@@ -89,6 +93,10 @@ public class DataNodeServer {
                 new DaemonThreadFactory("DataNode-Heartbeat"));
         this.gcScheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(
                 new DaemonThreadFactory("DataNode-GC"));
+
+        // 初始化副本拉取线程池 (固定 2 线程，足够串行处理对账任务的拉取)
+        this.pullExecutor = java.util.concurrent.Executors.newFixedThreadPool(2,
+                new DaemonThreadFactory("DataNode-Pull"));
     }
 
     // 运行标志
@@ -112,8 +120,9 @@ public class DataNodeServer {
             // 使用 NettyServerUtils 启动服务
             // 关键修复: 传入 Supplier 以便为每个连接创建新的 DataNodeHandler 实例
             // DataNodeHandler 是有状态的 (包含文件流)，绝对不能共享！
+            // 但注入的 pullExecutor / workerGroup 是无状态共享资源，可安全跨实例共享
             NettyServerUtils.start("DataNode", port,
-                () -> new DataNodeHandler(storagePaths),
+                () -> new DataNodeHandler(storagePaths, pullExecutor, workerGroup, 0L, nodeId),
                 businessGroup);
         } finally {
             // 正常退出时的清理
@@ -126,6 +135,10 @@ public class DataNodeServer {
      * 统一的资源释放方法，支持幂等调用
      */
     private void shutdown() {
+        // 先关闭拉取线程池（非 ScheduledExecutorService，需单独处理）
+        if (pullExecutor != null && !pullExecutor.isShutdown()) {
+            pullExecutor.shutdownNow();
+        }
         ServerShutdownHelper.shutdownAll(LOG, "DataNodeServer", running,
                 new ScheduledExecutorService[]{heartbeatScheduler, gcScheduler},
                 registryPoolMap, workerGroup);

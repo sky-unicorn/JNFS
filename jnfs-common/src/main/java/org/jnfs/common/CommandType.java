@@ -64,6 +64,18 @@ public enum CommandType {
     /** NameNode 心跳 */
     REGISTRY_HEARTBEAT_NAMENODE((byte) 39),
 
+    // --- 副本拉取相关指令 ---
+    /** 副本拉取请求 (target -> source: 我要拉 hash H) */
+    DATA_REPLICA_PULL_REQUEST((byte) 40),
+    /** 副本拉取响应 (source -> target: 返回文件长度) */
+    DATA_REPLICA_PULL_RESPONSE((byte) 41),
+    /** 副本数据块 (source -> target: 密文流，复用现有 ByteBuf 流式) */
+    DATA_REPLICA_CHUNK((byte) 42),
+    /** 副本提交 (target -> NameNode: 我已持有 H，登记 ACTIVE) */
+    DATA_REPLICA_COMMIT((byte) 43),
+    /** 副本拉取触发指令 (NameNode -> target DataNode: 协调目标节点开始从 source 拉取 hash H) */
+    DATA_REPLICA_PULL_CMD((byte) 44),
+
     /** 错误消息 */
     ERROR((byte) -1);
 

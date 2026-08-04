@@ -6,6 +6,11 @@ import com.github.benmanes.caffeine.cache.RemovalListener;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+
 /**
  * 元数据缓存管理器
  * 使用 Caffeine 实现 LRU 缓存，作为一级存储
@@ -19,7 +24,7 @@ public class MetadataCacheManager {
     private final boolean enabled;
 
     // 缓存容器
-    // Key: Hash, Value: MetadataEntry (包含 filename, address, storageId)
+    // Key: Hash, Value: MetadataEntry (包含 filename, storageId, locations 副本列表)
     private final Cache<String, MetadataEntry> metaCache;
     
     // 反向索引缓存 (Key: storageId, Value: hash)
@@ -108,20 +113,24 @@ public class MetadataCacheManager {
 
     /**
      * 保存元数据 (Write-Through)
-     * @param address 节点标识（node_id），非 host:port
+     *
+     * @param storageId         存储ID
+     * @param replicationFactor 目标副本数（1=单副本，2/3=组内节点数），写入 file_metadata.replication_factor
+     * @param locations         全部副本位置（PRIMARY 恒在首位；file 模式为单元素列表）
      */
-    public void put(String filename, String hash, String address, String storageId) {
+    public void put(String filename, String hash, String storageId,
+                    int replicationFactor, List<ReplicaLocation> locations) {
         // 1. 先持久化
         // 目前仅实现同步写入 (Sync)，异步写入需引入队列和Worker
         try {
-            metadataManager.logAddFile(filename, hash, address, storageId);
+            metadataManager.logAddFile(filename, hash, storageId, replicationFactor, locations);
         } catch (java.io.IOException e) {
             throw new RuntimeException("Metadata persistence failed", e);
         }
 
         // 2. 更新缓存
         if (enabled) {
-            MetadataEntry entry = new MetadataEntry(filename, hash, address, storageId);
+            MetadataEntry entry = new MetadataEntry(filename, hash, storageId, locations);
             metaCache.put(hash, entry);
             idToHashCache.put(storageId, hash);
         }
@@ -140,19 +149,82 @@ public class MetadataCacheManager {
     }
 
     /**
+     * 失效指定 hash 的缓存（供 DATA_REPLICA_COMMIT 登记后调用）。
+     * <p>
+     * COMMIT 登记新副本行后，旧缓存中的 locations 列表已过时（缺少新副本），
+     * 必须失效以触发下次 get() 时从持久层重新加载。
+     * <p>
+     * 同时清除 idToHashCache 对应项（若存在），保证反向索引一致性。
+     *
+     * @param hash 文件 hash
+     */
+    public void invalidate(String hash) {
+        if (!enabled || hash == null) {
+            return;
+        }
+        MetadataEntry old = metaCache.getIfPresent(hash);
+        metaCache.invalidate(hash);
+        if (old != null && old.storageId != null) {
+            idToHashCache.invalidate(old.storageId);
+        }
+    }
+
+    /**
      * 元数据实体类
+     * <p>
+     * 一个 entry 对应一个文件 hash，内含该文件的全部副本位置（{@link ReplicaLocation}）。
+     * per-file 字段（filename/hash/storageId）对同一 hash 的所有副本行相同。
+     * 缓存泛型不变（Cache&lt;String, MetadataEntry&gt;），get() 返回类型不变，调用方改动最小。
      */
     public static class MetadataEntry {
+
+        /** 副本排序：role ASC（PRIMARY 优先），status DESC（ACTIVE 优先） */
+        private static final Comparator<ReplicaLocation> LOCATION_ORDER =
+                Comparator.comparingInt(ReplicaLocation::getRole)
+                        .thenComparing(Comparator.comparingInt(ReplicaLocation::getStatus).reversed());
+
         public final String filename;
         public final String hash;
-        public final String address;  // 存储 node_id (旧数据兼容时为 host:port)
         public final String storageId;
+        /** 全部副本位置（不可变，按 role ASC/status DESC 排序，PRIMARY+ACTIVE 恒在首位） */
+        public final List<ReplicaLocation> locations;
 
-        public MetadataEntry(String filename, String hash, String address, String storageId) {
+        /**
+         * @param locations 全部副本位置；构造时会做防御性拷贝并按 role ASC/status DESC 排序。
+         *                  传 null 或空列表表示无副本（getPrimaryLocation 返回 null）。
+         */
+        public MetadataEntry(String filename, String hash, String storageId, List<ReplicaLocation> locations) {
             this.filename = filename;
             this.hash = hash;
-            this.address = address;
             this.storageId = storageId;
+            if (locations == null || locations.isEmpty()) {
+                this.locations = Collections.emptyList();
+            } else {
+                List<ReplicaLocation> sorted = new ArrayList<>(locations);
+                sorted.sort(LOCATION_ORDER);
+                this.locations = Collections.unmodifiableList(sorted);
+            }
+        }
+
+        /**
+         * 返回主副本位置（locations 首位）。locations 为空返回 null。
+         * 供需要单地址的调用方（秒传/下载单地址场景）使用。
+         */
+        public ReplicaLocation getPrimaryLocation() {
+            return locations.isEmpty() ? null : locations.get(0);
+        }
+
+        /**
+         * 返回主副本的 nodeId。无副本返回 null。
+         */
+        public String getPrimaryNodeId() {
+            ReplicaLocation primary = getPrimaryLocation();
+            return primary == null ? null : primary.getNodeId();
+        }
+
+        /** 副本数量 */
+        public int getLocationCount() {
+            return locations.size();
         }
     }
 }

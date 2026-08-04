@@ -62,6 +62,10 @@ public class JNFSDriver {
     // 是否已启动后台刷新线程
     private final AtomicBoolean refreshThreadStarted = new AtomicBoolean(false);
 
+    /** 并发写副本线程池（§6.2 + M2：3 线程，daemon 不阻止 JVM 退出） */
+    private final ExecutorService replicaWriteExecutor =
+            Executors.newFixedThreadPool(3, new DaemonThreadFactory("Driver-ReplicaWrite"));
+
     /**
      * 直连模式构造函数 (默认开启日志)
      */
@@ -309,6 +313,10 @@ public class JNFSDriver {
         if (scheduler != null && !scheduler.isShutdown()) {
             scheduler.shutdownNow();
         }
+        // 并发写副本线程池（M2）：daemon 线程，shutdownNow 中断在途任务
+        if (replicaWriteExecutor != null && !replicaWriteExecutor.isShutdown()) {
+            replicaWriteExecutor.shutdownNow();
+        }
         if (poolMap instanceof Closeable) {
             try {
                 ((Closeable) poolMap).close();
@@ -372,7 +380,8 @@ public class JNFSDriver {
     /**
      * 上传文件 (File 模式)
      * 1. 客户端本地加密
-     * 2. 上传密文到 DataNode
+     * 2. 并发向所有目标节点写密文（§6.2）
+     * 3. primary 必须成功，部分成功即提交
      */
     public String uploadFile(File file) throws Exception {
         if (!file.exists()) {
@@ -387,7 +396,7 @@ public class JNFSDriver {
 
         if (existingAddr != null) {
             LOG.info("[Driver] 发现相同文件 (节点: {})，触发秒传...", existingAddr);
-            String storageId = commitFile(file.getName(), fileHash, existingAddr);
+            String storageId = commitFile(file.getName(), fileHash, List.of(existingAddr));
             LOG.info("[Driver] 秒传成功！存储编号: {}", storageId);
             return storageId;
         }
@@ -398,25 +407,64 @@ public class JNFSDriver {
         securityUtil.encryptFile(file, encryptedFile);
         LOG.info("[Driver] 加密完成，准备上传密文");
 
+        // futures 在 try 外声明，使 finally 能在删除 .enc 前等待所有并发写线程结束
+        // 注意：全限定 java.util.concurrent.Future，避免与 io.netty.util.concurrent.Future 歧义
+        List<java.util.concurrent.Future<String>> futures = null;
         try {
             LOG.info("[Driver] 获得上传许可，开始上传...");
 
-            String dataNodeAddr = getDataNodeForUpload();
-            LOG.info("[Driver] 获得上传节点: {}", dataNodeAddr);
+            List<String> targets = getUploadTargets(fileHash);
+            if (targets.isEmpty()) {
+                throw new IOException("无可用上传节点");
+            }
+            LOG.info("[Driver] 获得上传目标: {}", targets);
 
-            String[] parts = dataNodeAddr.split(":");
-            String dnHost = parts[0];
-            int dnPort = Integer.parseInt(parts[1]);
+            // 并发写：每个 target 一个 Future（§6.2）
+            futures = new ArrayList<>(targets.size());
+            for (String addr : targets) {
+                futures.add(replicaWriteExecutor.submit(() -> {
+                    uploadToDataNodeWithRetry(addr, fileHash, encryptedFile);
+                    return addr;   // 成功返回 addr
+                }));
+            }
 
-            // 上传密文，使用但原始文件的 Hash (用于秒传和校验)
-            uploadToDataNode(dnHost, dnPort, encryptedFile, fileHash);
-            LOG.info("[Driver] 文件数据传输完成");
+            // 收集结果：per-node 超时 = 60 + fileSize/51200 + 6（连接）秒
+            long perNodeTimeoutSeconds = 60 + encryptedFile.length() / 51200 + 6;
+            List<String> succeeded = new ArrayList<>();
+            List<String> failed = new ArrayList<>();
+            for (int i = 0; i < futures.size(); i++) {
+                try {
+                    futures.get(i).get(perNodeTimeoutSeconds, TimeUnit.SECONDS);
+                    succeeded.add(targets.get(i));
+                } catch (Exception e) {
+                    failed.add(targets.get(i));
+                    LOG.warn("[Driver] 副本写入失败: {} 原因: {}", targets.get(i), e.getMessage());
+                }
+            }
 
-            String storageId = commitFile(file.getName(), fileHash, dataNodeAddr);
-            LOG.info("[Driver] 文件元数据提交完成，存储编号: {}", storageId);
+            // primary 必须成功（§6.2）
+            if (!succeeded.contains(targets.get(0))) {
+                throw new IOException("primary 写入失败，上传失败: " + targets.get(0));
+            }
+
+            // 部分成功即提交：COMMIT 只登记 succeeded（顺序 = targets 顺序，primary 恒首位）
+            String storageId = commitFile(file.getName(), fileHash, succeeded);
+            LOG.info("[Driver] 文件元数据提交完成，存储编号: {}，成功: {}/{}", storageId, succeeded.size(), targets.size());
 
             return storageId;
         } finally {
+            // .enc 删除竞态处理：确保所有并发写线程结束后再删除临时密文文件。
+            // 超时 get() 后 future 可能仍在跑（线程未中断），DefaultFileRegion 只读安全，
+            // 但 File 对象引用在 delete() 后不应再被访问。此处二次等待所有未完成 future：
+            // cancel(true) 发送中断信号，然后无超时 get() 等待线程退出。
+            if (futures != null) {
+                for (java.util.concurrent.Future<String> f : futures) {
+                    if (!f.isDone()) {
+                        f.cancel(true);
+                        try { f.get(); } catch (Exception ignored) { /* 已取消或中断，忽略 */ }
+                    }
+                }
+            }
             // 清理临时密文文件
             if (encryptedFile.exists()) {
                 encryptedFile.delete();
@@ -425,9 +473,11 @@ public class JNFSDriver {
     }
 
     /**
-     * 下载文件
-     * 1. 下载密文
-     * 2. 本地解密
+     * 下载文件（§8.2 故障转移：多副本逐个尝试，HMAC 失败也切换）。
+     * <p>
+     * NameNode 返回 {@code filename|hash|primary|replica1|replica2}，
+     * Driver 按顺序尝试每个副本，成功即返回；全部失败抛最后一个异常。
+     *
      * @param storageId 文件存储ID
      * @param targetPath 下载目标路径 (文件夹或文件全路径)
      */
@@ -436,62 +486,57 @@ public class JNFSDriver {
         LOG.info("[Driver] 获取下载信息: {}", locInfo);
 
         String[] parts = locInfo.split("\\|");
-        if (parts.length != 3) {
+        if (parts.length < 3) {
             throw new IOException("无效的下载位置信息: " + locInfo);
         }
 
         String filename = parts[0];
-        String hash = parts[1]; // 获取 Hash 用于请求下载
-        String address = parts[2];
+        String hash = parts[1];
 
-        String[] addrParts = address.split(":");
-        String dnHost = addrParts[0];
-        int dnPort = Integer.parseInt(addrParts[1]);
+        // 解析候选节点列表（§8.2：从 parts[2] 开始，跳过空段）
+        List<String> candidates = new ArrayList<>();
+        for (int i = 2; i < parts.length; i++) {
+            if (!parts[i].isEmpty()) {
+                candidates.add(parts[i]);
+            }
+        }
+        if (candidates.isEmpty()) {
+            throw new IOException("无可用下载节点: " + locInfo);
+        }
 
         // 解析目标文件路径
         File targetFile;
-        // 使用 Hutool 标准化路径 (处理分隔符、..、重复斜杠等)
         String normalizedPath = FileUtil.normalize(targetPath);
         File destination = new File(normalizedPath);
 
-        // 判断是否为目录：
-        // 1. 原始路径以分隔符结尾 (Hutool normalize 会去掉末尾分隔符，所以要用 targetPath 判断)
-        // 2. 或者 destination 已存在且是目录
         boolean isDirectory = targetPath.endsWith("/") || targetPath.endsWith("\\") || FileUtil.isDirectory(destination);
 
         if (isDirectory) {
-            // 如果是目录路径，确保目录存在
             FileUtil.mkdir(destination);
             targetFile = new File(destination, filename);
         } else {
-            // 否则视为完整的文件路径 (重命名)
             targetFile = destination;
-            // 确保父目录存在
             FileUtil.mkParentDirs(targetFile);
         }
 
-        // 先下载到临时密文文件 (与目标文件同目录)
-        // File encryptedFile = new File(targetFile.getParentFile(), targetFile.getName() + ".enc");
-
-        // DataNode 存储的是 Hash 命名的文件 (假设 DataNode 已按 Hash 存储)
-        //支持 流式解密，直接下载到目标文件
-        downloadFromDataNode(dnHost, dnPort, hash, targetFile);
-        LOG.info("[Driver] 下载并解密完成: {}", targetFile.getAbsolutePath());
-
-        /*
-        // --- 解密环节 (已改为流式解密，不再需要后续步骤) ---
-        System.out.println("[Driver] 正在解密文件...");
-        if (targetFile.exists()) {
-            targetFile.delete();
+        // 故障转移：逐个尝试候选节点（§8.2 + I3：跨节点不退避，立即试下一个）
+        IOException last = null;
+        for (String addr : candidates) {
+            try {
+                String[] ap = addr.split(":");
+                // per-node 超时：连接 6s + 传输按文件大小（30 分钟兜底上限）
+                // 文件大小未知时用 30 分钟兜底；已知时动态计算
+                long perNodeTimeoutSeconds = 30 * 60; // 默认兜底
+                downloadFromDataNode(ap[0], Integer.parseInt(ap[1]), hash, targetFile, perNodeTimeoutSeconds);
+                LOG.info("[Driver] 下载并解密完成: {}", targetFile.getAbsolutePath());
+                return targetFile;   // 成功即返回
+            } catch (IOException | RuntimeException e) {
+                LOG.warn("[Driver] 下载节点 {} 失败，切换下一副本: {}", addr, e.getMessage());
+                last = new IOException("下载失败 from " + addr + ": " + e.getMessage(), e);
+                // I3：跨节点不退避，立即试下一个
+            }
         }
-        SecurityUtil.decryptFile(encryptedFile, targetFile);
-        System.out.println("[Driver] 解密完成: " + targetFile.getAbsolutePath());
-
-        // 清理密文
-        encryptedFile.delete();
-        */
-
-        return targetFile;
+        throw last;
     }
 
     // ... 辅助方法 ...
@@ -516,12 +561,30 @@ public class JNFSDriver {
         }
     }
 
-    private String getDataNodeForUpload() throws Exception {
-        Packet response = sendRequestToNameNode(CommandType.NAMENODE_REQUEST_UPLOAD_LOC, new byte[0]);
+    /**
+     * 获取上传目标节点列表（§6.1 + §15.3：REQUEST_UPLOAD_LOC 携带 fileHash）。
+     * <p>
+     * NameNode 返回 {@code primary|sec1|sec2}（| 分隔，首个恒为 primary）。
+     * file 模式返回单元素 [primary]，mysql 模式返回 [primary, sec1, ...]。
+     *
+     * @param fileHash 文件 SHA256（上传前已计算，非空）
+     * @return 目标地址列表（首个恒为 primary），空列表表示无可用节点
+     */
+    private List<String> getUploadTargets(String fileHash) throws Exception {
+        Packet response = sendRequestToNameNode(
+                CommandType.NAMENODE_REQUEST_UPLOAD_LOC, fileHash.getBytes(StandardCharsets.UTF_8));
         if (response.getCommandType() == CommandType.ERROR) {
             throw new IOException("获取上传节点失败: " + new String(response.getData(), StandardCharsets.UTF_8));
         }
-        return new String(response.getData(), StandardCharsets.UTF_8);
+        String body = new String(response.getData(), StandardCharsets.UTF_8);
+        String[] segments = body.split("\\|");
+        List<String> targets = new ArrayList<>(segments.length);
+        for (String seg : segments) {
+            if (!seg.isEmpty()) {
+                targets.add(seg);
+            }
+        }
+        return targets;
     }
 
     private String getDownloadLocation(String storageId) throws Exception {
@@ -532,8 +595,17 @@ public class JNFSDriver {
         return new String(response.getData(), StandardCharsets.UTF_8);
     }
 
-    private String commitFile(String filename, String hash, String dataNodeAddr) throws Exception {
-        String payload = filename + "|" + hash + "|" + dataNodeAddr;
+    /**
+     * 提交文件元数据（§15.3 破坏性变更：多地址）。
+     * <p>
+     * payload 格式：{@code filename|hash|addr1,addr2,...}（addr 用 `,` 连接，外层 `|`）。
+     * NameNode 将首个 addr 视为 PRIMARY，其余为 SECONDARY。
+     *
+     * @param succeededAddrs 成功写入的节点地址列表（顺序 = targets 顺序，首个恒为 primary）
+     */
+    private String commitFile(String filename, String hash, List<String> succeededAddrs) throws Exception {
+        String addrList = String.join(",", succeededAddrs);
+        String payload = filename + "|" + hash + "|" + addrList;
         Packet response = sendRequestToNameNode(CommandType.NAMENODE_COMMIT_FILE, payload.getBytes(StandardCharsets.UTF_8));
 
         if (response.getCommandType() == CommandType.ERROR) {
@@ -578,7 +650,35 @@ public class JNFSDriver {
         }
     }
 
-    private void downloadFromDataNode(String host, int port, String hash, File targetFile) throws Exception {
+    /**
+     * 单节点写失败立即重试1次（§6.2 + 用户决策）。
+     * 仍失败则抛异常，留给夜间对账补齐。
+     */
+    private void uploadToDataNodeWithRetry(String addr, String hash, File encryptedFile) throws Exception {
+        String[] part = addr.split(":");
+        try {
+            uploadToDataNode(part[0], Integer.parseInt(part[1]), encryptedFile, hash);
+        } catch (Exception e1) {
+            LOG.warn("[Driver] 上传 {} 失败，重试1次: {}", addr, e1.getMessage());
+            try {
+                uploadToDataNode(part[0], Integer.parseInt(part[1]), encryptedFile, hash);
+            } catch (Exception e2) {
+                throw e2;   // 仍失败，留给夜间对账
+            }
+        }
+    }
+
+    /**
+     * 从 DataNode 下载文件（流式解密）。
+     *
+     * @param host DataNode 主机
+     * @param port DataNode 端口
+     * @param hash 文件 hash
+     * @param targetFile 目标文件（明文）
+     * @param perNodeTimeoutSeconds 单节点超时（秒），30 分钟为上限兜底
+     */
+    private void downloadFromDataNode(String host, int port, String hash, File targetFile,
+                                      long perNodeTimeoutSeconds) throws Exception {
         // 使用 PacketDecoder 复用协议解析逻辑
         DownloadHandler handler = new DownloadHandler(targetFile, securityUtil, LOG);
         // 使用通用工具类创建 Bootstrap
@@ -594,7 +694,8 @@ public class JNFSDriver {
             request.setData(hash.getBytes(StandardCharsets.UTF_8));
             channel.writeAndFlush(request);
 
-            handler.waitForCompletion();
+            // 动态超时：DownloadHandler 拿到 fileSize 后计算实际超时（保留 perNodeTimeoutSeconds 为上限兜底）
+            handler.waitForCompletion(perNodeTimeoutSeconds);
         } finally {
             channel.close().sync();
         }
@@ -861,17 +962,59 @@ public class JNFSDriver {
             }
         }
 
-        public void waitForCompletion() throws IOException, InterruptedException {
-            Object result = completionSignal.poll(30, TimeUnit.MINUTES);
-            if (result == null) {
-                throw new IOException("下载超时或失败");
-            }
-            if (result instanceof IOException) {
-                throw (IOException) result;
-            }
-            if (result.equals(false)) {
-                String msg = failureMessage != null ? failureMessage : "下载超时或失败";
-                throw new IOException(msg);
+        /**
+         * 等待下载完成（动态超时，§8.2）。
+         * <p>
+         * 三层超时机制：
+         * <ol>
+         *   <li>首响应超时：30s 内未收到 DOWNLOAD_RESPONSE（fileSize 仍 -1）即抛异常，
+         *       防止静默节点挂起 30 分钟阻塞故障转移</li>
+         *   <li>传输超时：fileSize 已知后动态计算 6 + fileSize/51200 秒（连接 6s + 按 50KB/s 估算）</li>
+         *   <li>硬上限：maxTimeoutSeconds（30 分钟）兜底</li>
+         * </ol>
+         * effective deadline = min(transferDeadline, hardDeadline)；首响应超时独立于 effective deadline。
+         *
+         * @param maxTimeoutSeconds 最大超时秒数（上限兜底，通常 30 分钟）
+         */
+        public void waitForCompletion(long maxTimeoutSeconds) throws IOException, InterruptedException {
+            long hardDeadlineMs = System.currentTimeMillis() + maxTimeoutSeconds * 1000L;
+            long firstResponseDeadlineMs = System.currentTimeMillis() + 30_000L; // 首响应 30s
+            long transferDeadlineMs = -1;   // fileSize 已知后设置
+
+            while (true) {
+                long now = System.currentTimeMillis();
+
+                // 首响应超时：30s 内未收到 DOWNLOAD_RESPONSE（fileSize 仍 -1）
+                if (fileSize < 0 && now >= firstResponseDeadlineMs) {
+                    throw new IOException("DataNode 首响应超时（30s 未收到 DOWNLOAD_RESPONSE）");
+                }
+
+                // fileSize 刚变为已知时，计算传输截止时间（一次性）
+                if (transferDeadlineMs < 0 && fileSize > 0) {
+                    long dynamicSeconds = 6 + fileSize / 51200;
+                    transferDeadlineMs = now + dynamicSeconds * 1000L;
+                }
+
+                long effectiveDeadline = (transferDeadlineMs > 0)
+                        ? Math.min(transferDeadlineMs, hardDeadlineMs)
+                        : hardDeadlineMs;
+                if (now >= effectiveDeadline) {
+                    throw new IOException("下载超时或失败");
+                }
+
+                long pollTimeoutMs = Math.min(500L, effectiveDeadline - now);
+                Object result = completionSignal.poll(pollTimeoutMs, TimeUnit.MILLISECONDS);
+                if (result == null) {
+                    continue;   // 窗口超时，重新检查 fileSize / deadline
+                }
+                if (result instanceof IOException) {
+                    throw (IOException) result;
+                }
+                if (result.equals(false)) {
+                    String msg = failureMessage != null ? failureMessage : "下载超时或失败";
+                    throw new IOException(msg);
+                }
+                return;   // result == true，下载完成
             }
         }
 

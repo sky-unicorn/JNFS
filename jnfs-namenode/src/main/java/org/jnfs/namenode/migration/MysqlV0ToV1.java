@@ -70,7 +70,11 @@ public class MysqlV0ToV1 implements MigrationStep {
                 // 2. 确保 file_location.datanode_id 字段存在
                 ensureDatanoIdColumn(conn);
 
-                // 3. 创建 schema_version 表并写入版本号
+                // 3. 确保 file_location.status 字段存在 (C3 根因修复：
+                //    历史 file_location 由旧构造函数建表时漏建 status 列，与 jnfs.sql 不一致)
+                ensureStatusColumn(conn);
+
+                // 4. 创建 schema_version 表并写入版本号
                 createSchemaVersionAndInsert(conn, 1);
 
                 conn.commit();
@@ -136,6 +140,31 @@ public class MysqlV0ToV1 implements MigrationStep {
         }
 
         LOG.info("MysqlV0ToV1: file_location.datanode_id 列已添加");
+    }
+
+    private void ensureStatusColumn(Connection conn) throws SQLException {
+        // 检查 status 列是否已存在
+        String checkSql = "SELECT COUNT(*) FROM information_schema.columns "
+                + "WHERE table_schema = DATABASE() "
+                + "AND table_name = 'file_location' "
+                + "AND column_name = 'status'";
+
+        try (PreparedStatement stmt = conn.prepareStatement(checkSql);
+             ResultSet rs = stmt.executeQuery()) {
+            if (rs.next() && rs.getInt(1) > 0) {
+                LOG.info("MysqlV0ToV1: file_location.status 列已存在，跳过 ALTER");
+                return;
+            }
+        }
+
+        // 添加 status 列（NOT NULL DEFAULT 1，与 jnfs.sql 一致，避免 NULL 被 WHERE status=1 漏掉）
+        conn.createStatement().executeUpdate(
+                "ALTER TABLE `file_location` "
+                        + "ADD COLUMN `status` TINYINT NOT NULL DEFAULT 1 COMMENT '状态: 1-正常, 0-损坏' "
+                        + "AFTER `datanode_addr`"
+        );
+
+        LOG.info("MysqlV0ToV1: file_location.status 列已添加");
     }
 
     private void createSchemaVersionAndInsert(Connection conn, int version) throws SQLException {

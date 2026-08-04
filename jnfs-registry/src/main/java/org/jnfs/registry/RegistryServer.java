@@ -31,6 +31,8 @@ public class RegistryServer {
     private final int port;
     private final int dashboardPort;
     private final AuthManager authManager;
+    /** 元数据库 DataSource（决策 9，冗余存储管理 API 用），null 表示未配置 */
+    private final com.zaxxer.hikari.HikariDataSource metadataDataSource;
 
     // 运行标志
     private final AtomicBoolean running = new AtomicBoolean(true);
@@ -38,18 +40,24 @@ public class RegistryServer {
     private DashboardServer dashboardServer;
 
     public RegistryServer(int port, int dashboardPort) {
-        this(port, dashboardPort, null);
+        this(port, dashboardPort, null, null);
     }
 
     public RegistryServer(int port, int dashboardPort, AuthManager authManager) {
+        this(port, dashboardPort, authManager, null);
+    }
+
+    public RegistryServer(int port, int dashboardPort, AuthManager authManager,
+                          com.zaxxer.hikari.HikariDataSource metadataDataSource) {
         this.port = port;
         this.dashboardPort = dashboardPort;
         this.authManager = authManager;
+        this.metadataDataSource = metadataDataSource;
     }
 
     public void run() throws Exception {
-        // 启动 Dashboard
-        dashboardServer = new DashboardServer(dashboardPort, authManager);
+        // 启动 Dashboard（传入元数据库 DataSource 供冗余存储 API 使用）
+        dashboardServer = new DashboardServer(dashboardPort, authManager, metadataDataSource);
         new Thread(() -> dashboardServer.start()).start();
 
         // 注册 Shutdown Hook
@@ -89,6 +97,15 @@ public class RegistryServer {
         // 3. 关闭 RegistryHandler 的定时清理任务
         RegistryHandler.shutdown();
 
+        // 4. 关闭元数据库 DataSource（决策 9，冗余存储 API）
+        if (metadataDataSource != null && !metadataDataSource.isClosed()) {
+            try {
+                metadataDataSource.close();
+            } catch (Exception e) {
+                LOG.warn("关闭元数据库 DataSource 失败", e);
+            }
+        }
+
         LOG.info("RegistryServer 资源释放完成");
     }
 
@@ -117,11 +134,57 @@ public class RegistryServer {
         // 初始化 Dashboard 登录鉴权
         AuthManager authManager = initAuth(dashboardConfig);
 
-        LOG.info("启动注册中心 -> RPC Port: {}, Dashboard Port: {}, Heartbeat Timeout: {}ms{}",
-                port, dashboardPort, heartbeatTimeout,
-                authManager != null ? ", 鉴权: 已启用" : ", 鉴权: 已禁用");
+        // 初始化元数据库 DataSource（决策 9：Registry 连元数据库读写冗余组/策略/任务表）
+        com.zaxxer.hikari.HikariDataSource metadataDataSource = initMetadataDataSource(config);
 
-        new RegistryServer(port, dashboardPort, authManager).run();
+        LOG.info("启动注册中心 -> RPC Port: {}, Dashboard Port: {}, Heartbeat Timeout: {}ms{}{}",
+                port, dashboardPort, heartbeatTimeout,
+                authManager != null ? ", 鉴权: 已启用" : ", 鉴权: 已禁用",
+                metadataDataSource != null ? ", 元数据API: 已启用" : ", 元数据API: 未配置");
+
+        new RegistryServer(port, dashboardPort, authManager, metadataDataSource).run();
+    }
+
+    /**
+     * 根据配置初始化元数据库 DataSource（决策 9）。
+     * <p>
+     * 配置路径：metadata.{host, port, database, user, password}
+     * 指向 NameNode 所用的元数据库（jnfs schema），与 dashboard.auth.storage 的 jnfs_registry 用户库分离。
+     * 未配置 metadata 段时返回 null（冗余存储 API 不可用）。
+     *
+     * @return HikariDataSource，未配置时 null
+     */
+    @SuppressWarnings("unchecked")
+    private static com.zaxxer.hikari.HikariDataSource initMetadataDataSource(Map<String, Object> config) {
+        if (!config.containsKey("metadata")) {
+            LOG.info("未配置 metadata 段，冗余存储 API 不可用");
+            return null;
+        }
+        Map<String, Object> metaConfig = (Map<String, Object>) config.get("metadata");
+        // 仅 mysql 模式支持（file 模式单机无冗余）
+        String mode = (String) metaConfig.getOrDefault("mode", "file");
+        if (!"mysql".equalsIgnoreCase(mode)) {
+            LOG.info("metadata.mode={}, 非 mysql 模式不启用冗余存储 API", mode);
+            return null;
+        }
+        Map<String, Object> mysqlConfig = (Map<String, Object>) metaConfig.getOrDefault("mysql", Map.of());
+        String dbHost = (String) mysqlConfig.getOrDefault("host", "localhost");
+        int dbPort = ((Number) mysqlConfig.getOrDefault("port", 3306)).intValue();
+        String dbName = (String) mysqlConfig.getOrDefault("database", "jnfs");
+        String dbUser = (String) mysqlConfig.getOrDefault("user", "root");
+        String dbPassword = (String) mysqlConfig.getOrDefault("password", "");
+
+        com.zaxxer.hikari.HikariConfig hikariConfig = new com.zaxxer.hikari.HikariConfig();
+        hikariConfig.setJdbcUrl("jdbc:mysql://" + dbHost + ":" + dbPort + "/" + dbName
+                + "?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true");
+        hikariConfig.setUsername(dbUser);
+        hikariConfig.setPassword(dbPassword);
+        hikariConfig.setMaximumPoolSize(3); // Dashboard 请求量小
+        hikariConfig.addDataSourceProperty("cachePrepStmts", "true");
+        hikariConfig.addDataSourceProperty("prepStmtCacheSize", "250");
+        hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
+        LOG.info("元数据库 DataSource 已创建: {}:{}/{}", dbHost, dbPort, dbName);
+        return new com.zaxxer.hikari.HikariDataSource(hikariConfig);
     }
 
     /**
