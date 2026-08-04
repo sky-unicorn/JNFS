@@ -12,16 +12,16 @@ storage:
   # 存储模式：file | mysql
   # file  = 单机零依赖开箱即用（鉴权用户存本地文件，冗余 API 不可用）
   # mysql = 连接 MySQL（dashboard_user 表与冗余元数据表同库，冗余 API 可用）
-  mode: file
+  mode: mysql
 
   # MySQL 连接配置（仅当 mode: mysql 时生效）
   # dashboard 鉴权用户表与冗余组/策略/任务表共用此连接与同一数据库
   mysql:
-    host: localhost
+    host: 100.10.11.204
     port: 3306
     database: jnfs                # dashboard_user 表与冗余元数据表同库
     user: jnfs
-    password: ""                  # 建议通过外部 conf/registry.yml 配置，勿提交明文
+    password: jnfs@123                  # 建议通过外部 conf/registry.yml 配置，勿提交明文
 
 # --- 监控 Dashboard 配置 ---
 dashboard:
