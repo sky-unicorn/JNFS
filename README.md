@@ -213,6 +213,16 @@ metadata:
 server:
   port: 5367
   
+# 统一存储配置（一个 mode 同时决定鉴权用户后端与冗余 API 是否启用）
+storage:
+  mode: mysql                 # file=单机零依赖；mysql=连库，启用冗余 API
+  mysql:
+    host: localhost
+    port: 3306
+    database: jnfs            # dashboard_user 表与冗余元数据表同库
+    user: root
+    password: password
+
 dashboard:
   port: 15367
 

@@ -1,10 +1,9 @@
 package org.jnfs.registry.auth;
 
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -13,22 +12,26 @@ import java.sql.SQLException;
 /**
  * MySQL 模式用户存储
  * <p>
- * 使用 HikariCP 连接池操作 dashboard_user 表。
+ * 使用外部传入的 {@link DataSource} 操作 dashboard_user 表。
  * 构造时 CREATE TABLE IF NOT EXISTS 幂等建表（不接入 MigrationRunner）。
  * <p>
- * 可与 NameNode 共用同一 MySQL 实例，但建议使用独立数据库（如 jnfs_registry），
- * 避免与元数据表混淆。
+ * 与 Registry 冗余存储 API 共用同一 {@code DataSource} 与同一数据库（jnfs），
+ * 连接池生命周期由 {@code RegistryServer} 统一管理；本类 {@link #close()} 为空操作，
+ * 不关闭共享 {@code DataSource}（避免影响冗余 API）。
  */
 public class MysqlUserStore implements UserStore {
 
     private static final Logger LOG = LoggerFactory.getLogger(MysqlUserStore.class);
 
-    private final HikariDataSource dataSource;
+    private final DataSource dataSource;
 
-    public MysqlUserStore(String host, int port, String dbName, String user, String password) {
-        this.dataSource = createDataSource(host, port, dbName, user, password);
+    /**
+     * @param dataSource 外部共享连接池（由 RegistryServer 统一创建与关闭），本类 close() 不会关闭它
+     */
+    public MysqlUserStore(DataSource dataSource) {
+        this.dataSource = dataSource;
         ensureTableExists();
-        LOG.info("MysqlUserStore: 已连接 {}:{}/{}", host, port, dbName);
+        LOG.info("MysqlUserStore: 已接入共享 DataSource");
     }
 
     @Override
@@ -103,29 +106,15 @@ public class MysqlUserStore implements UserStore {
         return 0;
     }
 
+    /**
+     * 空操作：共享 DataSource 由 RegistryServer 统一关闭，此处不重复关闭。
+     */
     @Override
     public void close() {
-        if (dataSource != null && !dataSource.isClosed()) {
-            dataSource.close();
-            LOG.info("MysqlUserStore: DataSource 已关闭");
-        }
+        // no-op：共享 DataSource 生命周期由 RegistryServer 管理
     }
 
     // ==================== 内部方法 ====================
-
-    private static HikariDataSource createDataSource(String host, int port, String dbName,
-                                                      String user, String password) {
-        HikariConfig config = new HikariConfig();
-        config.setJdbcUrl("jdbc:mysql://" + host + ":" + port + "/" + dbName
-                + "?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true");
-        config.setUsername(user);
-        config.setPassword(password);
-        config.setMaximumPoolSize(3); // Dashboard 用户量极小
-        config.addDataSourceProperty("cachePrepStmts", "true");
-        config.addDataSourceProperty("prepStmtCacheSize", "250");
-        config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
-        return new HikariDataSource(config);
-    }
 
     /**
      * 幂等建表：CREATE TABLE IF NOT EXISTS

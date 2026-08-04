@@ -172,9 +172,8 @@ INSERT IGNORE INTO `replication_control` (`id`) VALUES (1);
 
 -- ----------------------------
 -- Registry Dashboard 鉴权用户表
--- 说明：此表由 Registry 进程的 Dashboard 登录功能使用，与 NameNode 元数据表物理隔离、无外键依赖。
---       默认建议建在独立数据库 jnfs_registry（见 registry.yml: dashboard.auth.storage.mysql.database）；
---       若与 NameNode 共用同一数据库，可直接执行下方 DDL。
+-- 说明：此表由 Registry 进程的 Dashboard 登录功能使用，与冗余元数据表同库（jnfs），无外键依赖。
+--       统一存储配置见 registry.yml: storage（mode=mysql 时由 MysqlUserStore 共享同一 DataSource）。
 --       password_hash 仅存 BCrypt 哈希（$2a$...），绝不存明文。
 -- ----------------------------
 DROP TABLE IF EXISTS `dashboard_user`;

@@ -31,7 +31,11 @@ public class RegistryServer {
     private final int port;
     private final int dashboardPort;
     private final AuthManager authManager;
-    /** 元数据库 DataSource（决策 9，冗余存储管理 API 用），null 表示未配置 */
+    /**
+     * 共享存储 DataSource（storage.mode=mysql 时创建）。
+     * 同时供 Dashboard 鉴权用户库（dashboard_user 表）与冗余存储管理 API 使用，两者同库。
+     * file 模式为 null。
+     */
     private final com.zaxxer.hikari.HikariDataSource metadataDataSource;
 
     // 运行标志
@@ -131,43 +135,38 @@ public class RegistryServer {
         // 更新 Handler 中的超时设置
         RegistryHandler.heartbeatTimeout = heartbeatTimeout;
 
-        // 初始化 Dashboard 登录鉴权
-        AuthManager authManager = initAuth(dashboardConfig);
+        // 统一存储配置：一个 mode 同时决定鉴权用户后端与冗余 API 是否启用，避免重复耦合
+        Map<String, Object> storageConfig = (Map<String, Object>) config.getOrDefault("storage", Map.of());
+        String storageMode = (String) storageConfig.getOrDefault("mode", "file");
 
-        // 初始化元数据库 DataSource（决策 9：Registry 连元数据库读写冗余组/策略/任务表）
-        com.zaxxer.hikari.HikariDataSource metadataDataSource = initMetadataDataSource(config);
+        // mysql 模式：创建单一共享 DataSource（dashboard_user 表与冗余元数据表同库）
+        // file 模式：不创建 DataSource（FileUserStore + 无冗余 API）
+        com.zaxxer.hikari.HikariDataSource storageDataSource =
+                "mysql".equalsIgnoreCase(storageMode) ? createMysqlDataSource(storageConfig) : null;
 
-        LOG.info("启动注册中心 -> RPC Port: {}, Dashboard Port: {}, Heartbeat Timeout: {}ms{}{}",
-                port, dashboardPort, heartbeatTimeout,
+        // 初始化 Dashboard 鉴权（mysql 模式复用共享 DataSource）
+        AuthManager authManager = initAuth(dashboardConfig, storageMode, storageDataSource);
+
+        LOG.info("启动注册中心 -> RPC Port: {}, Dashboard Port: {}, Heartbeat Timeout: {}ms, 存储模式: {}{}{}",
+                port, dashboardPort, heartbeatTimeout, storageMode,
                 authManager != null ? ", 鉴权: 已启用" : ", 鉴权: 已禁用",
-                metadataDataSource != null ? ", 元数据API: 已启用" : ", 元数据API: 未配置");
+                storageDataSource != null ? ", 冗余API: 已启用" : ", 冗余API: 未启用");
 
-        new RegistryServer(port, dashboardPort, authManager, metadataDataSource).run();
+        new RegistryServer(port, dashboardPort, authManager, storageDataSource).run();
     }
 
     /**
-     * 根据配置初始化元数据库 DataSource（决策 9）。
+     * 根据顶层 storage 配置创建共享 MySQL DataSource。
      * <p>
-     * 配置路径：metadata.{host, port, database, user, password}
-     * 指向 NameNode 所用的元数据库（jnfs schema），与 dashboard.auth.storage 的 jnfs_registry 用户库分离。
-     * 未配置 metadata 段时返回 null（冗余存储 API 不可用）。
+     * 配置路径：storage.mysql.{host, port, database, user, password}
+     * dashboard_user 表与冗余组/策略/任务表共用此连接与同一数据库。
      *
-     * @return HikariDataSource，未配置时 null
+     * @param storageConfig 顶层 storage 配置段
+     * @return HikariDataSource
      */
     @SuppressWarnings("unchecked")
-    private static com.zaxxer.hikari.HikariDataSource initMetadataDataSource(Map<String, Object> config) {
-        if (!config.containsKey("metadata")) {
-            LOG.info("未配置 metadata 段，冗余存储 API 不可用");
-            return null;
-        }
-        Map<String, Object> metaConfig = (Map<String, Object>) config.get("metadata");
-        // 仅 mysql 模式支持（file 模式单机无冗余）
-        String mode = (String) metaConfig.getOrDefault("mode", "file");
-        if (!"mysql".equalsIgnoreCase(mode)) {
-            LOG.info("metadata.mode={}, 非 mysql 模式不启用冗余存储 API", mode);
-            return null;
-        }
-        Map<String, Object> mysqlConfig = (Map<String, Object>) metaConfig.getOrDefault("mysql", Map.of());
+    private static com.zaxxer.hikari.HikariDataSource createMysqlDataSource(Map<String, Object> storageConfig) {
+        Map<String, Object> mysqlConfig = (Map<String, Object>) storageConfig.getOrDefault("mysql", Map.of());
         String dbHost = (String) mysqlConfig.getOrDefault("host", "localhost");
         int dbPort = ((Number) mysqlConfig.getOrDefault("port", 3306)).intValue();
         String dbName = (String) mysqlConfig.getOrDefault("database", "jnfs");
@@ -179,28 +178,35 @@ public class RegistryServer {
                 + "?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true");
         hikariConfig.setUsername(dbUser);
         hikariConfig.setPassword(dbPassword);
-        hikariConfig.setMaximumPoolSize(3); // Dashboard 请求量小
+        hikariConfig.setMaximumPoolSize(5); // Dashboard 鉴权 + 冗余 API 共享，略大于原 3
         hikariConfig.addDataSourceProperty("cachePrepStmts", "true");
         hikariConfig.addDataSourceProperty("prepStmtCacheSize", "250");
         hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
-        LOG.info("元数据库 DataSource 已创建: {}:{}/{}", dbHost, dbPort, dbName);
+        LOG.info("共享存储 DataSource 已创建: {}:{}/{}", dbHost, dbPort, dbName);
         return new com.zaxxer.hikari.HikariDataSource(hikariConfig);
     }
 
     /**
-     * 根据配置初始化 Dashboard 鉴权
+     * 根据配置初始化 Dashboard 鉴权。
+     * <p>
+     * 用户存储后端由顶层 storage.mode 决定：
+     * - mysql：复用共享 DataSource（MysqlUserStore，close() 不关闭共享池）
+     * - file：本地文件（FileUserStore）
      * <p>
      * 配置路径：dashboard.auth.*
      * - enabled: 是否启用（默认 false，保留旧的无登录行为）
-     * - storage.mode: file | mysql（默认 file）
-     * - storage.mysql.*: mysql 连接信息
      * - initial-admin.*: 首次启动且无用户时创建初始管理员
      * - session.timeout-seconds: session 有效期（默认 7200）
      *
+     * @param dashboardConfig  dashboard 配置段
+     * @param storageMode      顶层 storage.mode（file | mysql）
+     * @param sharedDataSource 共享 DataSource（mysql 模式时非 null）
      * @return AuthManager 实例，未启用鉴权时返回 null
      */
     @SuppressWarnings("unchecked")
-    private static AuthManager initAuth(Map<String, Object> dashboardConfig) {
+    private static AuthManager initAuth(Map<String, Object> dashboardConfig,
+                                        String storageMode,
+                                        com.zaxxer.hikari.HikariDataSource sharedDataSource) {
         Map<String, Object> authConfig = (Map<String, Object>) dashboardConfig.getOrDefault("auth", Map.of());
         boolean authEnabled = Boolean.TRUE.equals(authConfig.get("enabled"));
         if (!authEnabled) {
@@ -208,19 +214,11 @@ public class RegistryServer {
             return null;
         }
 
-        // 1. 创建 UserStore
-        Map<String, Object> storageConfig = (Map<String, Object>) authConfig.getOrDefault("storage", Map.of());
-        String storageMode = (String) storageConfig.getOrDefault("mode", "file");
+        // 1. 创建 UserStore（后端由顶层 storage.mode 决定）
         UserStore userStore;
-        if ("mysql".equalsIgnoreCase(storageMode)) {
-            Map<String, Object> mysqlConfig = (Map<String, Object>) storageConfig.getOrDefault("mysql", Map.of());
-            String dbHost = (String) mysqlConfig.getOrDefault("host", "localhost");
-            int dbPort = ((Number) mysqlConfig.getOrDefault("port", 3306)).intValue();
-            String dbName = (String) mysqlConfig.getOrDefault("database", "jnfs_registry");
-            String dbUser = (String) mysqlConfig.getOrDefault("user", "root");
-            String dbPassword = (String) mysqlConfig.getOrDefault("password", "");
-            userStore = new MysqlUserStore(dbHost, dbPort, dbName, dbUser, dbPassword);
-            LOG.info("Dashboard 用户存储: MySQL ({}:{}/{})", dbHost, dbPort, dbName);
+        if ("mysql".equalsIgnoreCase(storageMode) && sharedDataSource != null) {
+            userStore = new MysqlUserStore(sharedDataSource);
+            LOG.info("Dashboard 用户存储: MySQL（共享存储 DataSource）");
         } else {
             userStore = new FileUserStore();
             LOG.info("Dashboard 用户存储: 本地文件");

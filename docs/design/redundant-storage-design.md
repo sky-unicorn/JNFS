@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS replication_group (
 ```
 
 - Dashboard 读写该表；NameNode 定期从 mysql 加载冗余组定义（NameNode 本就连元数据库）。
-- **冗余功能仅在 `metadata.mode=mysql` 时启用**；file 模式（单机）不启用冗余，保持单副本。
+- **冗余功能仅在 `storage.mode=mysql`（Registry 连元数据库）时启用**；file 模式（单机）不启用冗余，保持单副本。
 
 **对账同步任务表**（决策 10：对账任务持久化，解决 I6）：
 
