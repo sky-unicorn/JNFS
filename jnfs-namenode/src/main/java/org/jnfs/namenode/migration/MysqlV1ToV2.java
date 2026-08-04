@@ -21,6 +21,7 @@ import java.sql.SQLException;
  * 3. ALTER TABLE file_location ADD INDEX idx_hash_status（幂等）
  * 4. CREATE TABLE IF NOT EXISTS replication_group
  * 5. CREATE TABLE IF NOT EXISTS replica_sync_task
+ * 6. ALTER TABLE file_location 确保 status 列存在（幂等，修复部分 V1 库缺列）
  * <p>
  * 版本号写入：{@code handlesOwnVersionWrite()} 返回 false，由 {@link org.jnfs.common.migration.MigrationRunner}
  * 在本步骤成功后用其单行 UPDATE/INSERT 路径（writeMysqlVersion）写入版本号 2。
@@ -74,6 +75,12 @@ public class MysqlV1ToV2 implements MigrationStep {
             // 注意：MySQL DDL 隐式提交，setAutoCommit(false) 对 DDL 无效。
             // 不再使用事务包装，避免误导。重入安全依赖幂等性（INV-3）。
 
+            // 0. 前置依赖：确保 file_location.status 列存在。
+            //    修复历史部分 V1 库（schema_version=1 但 file_location 缺 status 列，
+            //    由早期建表漏建 + V0→V1 版本号已推进导致 ensureStatusColumn 不再执行）。
+            //    本步骤 AFTER status 与 idx_hash_status 索引均依赖该列，故在此幂等补齐。
+            ensureStatusColumn(conn);
+
             // 1. file_location 增加 replica_role 列
             addReplicaRoleColumn(conn);
 
@@ -97,6 +104,36 @@ public class MysqlV1ToV2 implements MigrationStep {
             LOG.error("MysqlV1ToV2: 迁移失败", e);
             return "MySQL migration V1→V2 failed: " + e.getMessage();
         }
+    }
+
+    /**
+     * 幂等确保 file_location.status 列存在。
+     * <p>
+     * 修复历史部分 V1 库：早期建表漏建 status 列，schema_version 已推进到 1，
+     * 导致 V0->V1 的 ensureStatusColumn 不再执行。本步骤的 AFTER status 与
+     * idx_hash_status 索引依赖该列，故在此幂等补齐（information_schema 检查）。
+     */
+    private void ensureStatusColumn(Connection conn) throws SQLException {
+        String checkSql = "SELECT COUNT(*) FROM information_schema.columns "
+                + "WHERE table_schema = DATABASE() "
+                + "AND table_name = 'file_location' "
+                + "AND column_name = 'status'";
+
+        try (PreparedStatement stmt = conn.prepareStatement(checkSql);
+             ResultSet rs = stmt.executeQuery()) {
+            if (rs.next() && rs.getInt(1) > 0) {
+                LOG.info("MysqlV1ToV2: file_location.status 列已存在，跳过 ALTER");
+                return;
+            }
+        }
+
+        conn.createStatement().executeUpdate(
+                "ALTER TABLE `file_location` "
+                        + "ADD COLUMN `status` TINYINT NOT NULL DEFAULT 1 "
+                        + "COMMENT '状态: 1-正常, 0-损坏' "
+                        + "AFTER `datanode_addr`"
+        );
+        LOG.info("MysqlV1ToV2: file_location.status 列已补齐");
     }
 
     private void addReplicaRoleColumn(Connection conn) throws SQLException {

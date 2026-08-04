@@ -552,7 +552,15 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
                 // Driver 侧故障转移兜底——连接失败后自动切换下一副本
                 hostPort = NodeAddressResolver.resolve(loc.getNodeId());
             }
-            sb.append("|").append(hostPort);
+            // 防御：resolve fallback 返回原始 nodeId（UUID 格式，不是 host:port），
+            // 说明该副本的节点已下线且无法解析地址，跳过此副本避免 Driver 解析越界。
+            if (hostPort != null && !NodeAddressResolver.isHostPort(hostPort)) {
+                LOG.warn("handleDownloadLocRequest: 跳过无法解析地址的副本 nodeId={}", loc.getNodeId());
+                continue;
+            }
+            if (hostPort != null) {
+                sb.append("|").append(hostPort);
+            }
         }
 
         NettyHandlerHelper.sendResponse(ctx, CommandType.NAMENODE_RESPONSE_DOWNLOAD_LOC, sb.toString().getBytes(StandardCharsets.UTF_8));

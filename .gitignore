@@ -37,3 +37,4 @@ file_to_mysql_imported
 CLAUDE.md
 docs/design/upgrade-migration-architecture.md
 dashboard_users.properties
+dist-test/**

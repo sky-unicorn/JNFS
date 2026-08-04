@@ -314,7 +314,8 @@ public class ReplicaSyncScheduler {
     /**
      * 差集计算（§7.2 + M6）：分页遍历 file_metadata，找出副本不足的文件并入队。
      * <p>
-     * primary_node 判定：file_location 中该 hash 的 PRIMARY(replica_role=0) 行的 datanode_id。
+     * source 节点判定：file_location 中该 hash 的源节点，优先 PRIMARY(replica_role=0)，
+     * primary 副本丢失时 fallback 到任意 ACTIVE 副本节点（保证 primary 丢失仍可补齐）。
      * 一致性校验 MVP：仅做元数据差集；孤儿文件记告警不删（§10.3）。
      *
      * @return 新入队的任务数
@@ -344,15 +345,18 @@ public class ReplicaSyncScheduler {
                     continue; // 副本充足
                 }
 
-                // 缺失：选 target（组内除已持有节点外）
-                String primaryNode = findPrimaryNode(row.fileHash);
-                if (primaryNode == null) {
-                    LOG.warn("ReplicaSyncScheduler: file_hash={} 无 PRIMARY 节点，跳过", row.fileHash);
+                // 缺失：选 source（组内任意持有节点）+ target（组内未持有者）
+                // 修复：source 优先 PRIMARY，primary 副本丢失时 fallback 到任意 ACTIVE 副本。
+                // 原 findPrimaryNode 严格查 replica_role=0，primary 丢失时返回 null 导致对账放弃，
+                // 违背冗余存储目标（primary 丢失恰是最需补齐的场景）。
+                String sourceNode = findSourceNode(row.fileHash);
+                if (sourceNode == null) {
+                    LOG.warn("ReplicaSyncScheduler: file_hash={} 无任何 ACTIVE 副本，跳过（所有副本都已失效）", row.fileHash);
                     continue;
                 }
 
                 List<String> existingNodes = findExistingNodes(row.fileHash);
-                List<String> targets = chooseTargets(primaryNode, existingNodes, expected - actual);
+                List<String> targets = chooseTargets(sourceNode, existingNodes, expected - actual);
                 if (targets.isEmpty()) {
                     LOG.warn("ReplicaSyncScheduler: file_hash={} 无可用目标节点（组内均已持有或组定义缺失）", row.fileHash);
                     continue;
@@ -362,7 +366,7 @@ public class ReplicaSyncScheduler {
                     ReplicaSyncTask task = new ReplicaSyncTask();
                     task.setTaskId(UUID.randomUUID().toString());
                     task.setFileHash(row.fileHash);
-                    task.setSourceNode(primaryNode);
+                    task.setSourceNode(sourceNode);
                     task.setTargetNode(target);
                     task.setFileSize(row.fileSize);
                     try {
@@ -550,12 +554,29 @@ public class ReplicaSyncScheduler {
     }
 
     /**
-     * 找 file_location 中该 hash 的 PRIMARY(replica_role=0) 行的 datanode_id。
+     * 找 file_location 中该 hash 的源节点（用于对账拉取）。
+     * <p>
+     * 优先 PRIMARY(replica_role=0)；primary 副本丢失时 fallback 到任意 ACTIVE 副本节点。
+     * <p>
+     * 修复：原 findPrimaryNode 仅查 role=0，primary 副本丢失时返回 null 导致对账放弃补齐。
+     * primary 丢失恰是最需要补齐的场景，应当用现存的 secondary 副本作为 source 拉取到缺失节点。
      */
-    private String findPrimaryNode(String fileHash) throws SQLException {
-        String sql = "SELECT datanode_id FROM file_location WHERE file_hash = ? AND replica_role = 0 AND status = 1 LIMIT 1";
+    private String findSourceNode(String fileHash) throws SQLException {
+        // 优先 PRIMARY
+        String primarySql = "SELECT datanode_id FROM file_location WHERE file_hash = ? AND replica_role = 0 AND status = 1 LIMIT 1";
         try (Connection conn = dataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
+             PreparedStatement stmt = conn.prepareStatement(primarySql)) {
+            stmt.setString(1, fileHash);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getString(1);
+                }
+            }
+        }
+        // fallback：任意 ACTIVE 副本节点（primary 已丢失，用现有 secondary 作 source）
+        String fallbackSql = "SELECT datanode_id FROM file_location WHERE file_hash = ? AND status = 1 LIMIT 1";
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(fallbackSql)) {
             stmt.setString(1, fileHash);
             try (ResultSet rs = stmt.executeQuery()) {
                 return rs.next() ? rs.getString(1) : null;

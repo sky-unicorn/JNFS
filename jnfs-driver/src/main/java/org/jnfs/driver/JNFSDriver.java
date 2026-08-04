@@ -524,6 +524,13 @@ public class JNFSDriver {
         for (String addr : candidates) {
             try {
                 String[] ap = addr.split(":");
+                // 防御：地址非 host:port 格式（如孤儿 nodeId fallback）时无法下载，
+                // 记录为不可用并切换到下一副本，而不是抛越界异常。
+                if (ap.length < 2 || ap[0].isEmpty() || ap[1].isEmpty()) {
+                    LOG.warn("[Driver] 副本地址格式非法，跳过: {}", addr);
+                    last = new IOException("非法副本地址: " + addr);
+                    continue;
+                }
                 // per-node 超时：连接 6s + 传输按文件大小（30 分钟兜底上限）
                 // 文件大小未知时用 30 分钟兜底；已知时动态计算
                 long perNodeTimeoutSeconds = 30 * 60; // 默认兜底
