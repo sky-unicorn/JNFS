@@ -70,6 +70,9 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     // 用于 DATA_REPLICA_COMMIT 登记后 markDone(taskId) + 缓存失效
     private static ReplicaSyncScheduler replicaSyncScheduler;
 
+    // 排空节点集合（§6.2：NameNode 启动时从 node_drain 表加载，drain_status=1 的 node_id）
+    private static final Set<String> drainedNodes = ConcurrentHashMap.newKeySet();
+
     // 活跃的 DataNode 列表 (包含 freeSpace 信息)
     // 使用 volatile + Copy-On-Write 思想 (不可变快照) 解决并发读写问题
     private static volatile List<String> dataNodes = Collections.emptyList();
@@ -174,14 +177,29 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     }
 
     /**
-     * 选择副本目标节点（§6.1）。
+     * 初始化排空节点集合（§6.2：由 NameNodeServer 启动时调用）。
+     * mysql 模式传入从 node_drain 表加载的集合；file 模式传空集。
+     *
+     * @param nodes drain_status=1 的 node_id 集合，null 视为空集
+     */
+    public static void initDrainedNodes(java.util.Set<String> nodes) {
+        drainedNodes.clear();
+        if (nodes != null) {
+            drainedNodes.addAll(nodes);
+        }
+        LOG.info("NameNodeHandler: 加载 {} 个 drained 节点", drainedNodes.size());
+    }
+
+    /**
+     * 选择副本目标节点（§6.1 + §7.2）。
      * <p>
      * 返回组内目标节点 node_id 列表（primary 恒首位）。
      * <ul>
-     *   <li>mysql 模式：primary 由加权随机选出，若 primary 在冗余组内则返回组内全部成员（primary 恒首）</li>
+     *   <li>mysql 模式：primary 由加权随机选出，若 primary 在冗余组内则返回组内非 drained 成员（primary 恒首，§7.2 降级语义）</li>
      *   <li>file 模式（store==null）或 primary 不在任何组内：返回 [primary]（M3 降级单副本）</li>
      *   <li>无可用节点（dataNodes 为空 / selectNodeId 返回 null）：返回空列表</li>
      * </ul>
+     * 候选过滤排除 drained 节点（drainedNodes 集合，§7.2）；组内成员拼接时同样排除 drained 节点。
      *
      * @param fileHash 文件 hash（用于排除已持有该文件的节点；新文件可传 null）
      * @return 目标 node_id 列表（primary 恒首位），空列表表示无可用节点
@@ -204,12 +222,17 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             }
         }
 
-        // 过滤候选：排除已持有该文件的节点
+        // 过滤候选：排除已持有该文件的节点 + 排除 drained 节点（§7.2）
+        // 4 个过滤条件：
+        // 1) 不在已持有该文件的节点中（existingNodeIds）
+        // 2) 当前 online（dataNodes 已是 online 集合，Registry 心跳维护）
+        // 3) drain_status = 0（NameNode 启动时加载的 drainedNodes 集合）
+        // 4) [可选] 节点可达 — 当前不做 ping，靠心跳间接保证
         List<String> candidates = new ArrayList<>();
         for (String nodeInfo : dataNodes) {
             String[] parts = nodeInfo.split("\\|");
             String nodeId = parts[0]; // node_id 恒 parts[0]（nodeId|host|port 或 nodeId|host:port 均如此）
-            if (!existingNodeIds.contains(nodeId)) {
+            if (!existingNodeIds.contains(nodeId) && !drainedNodes.contains(nodeId)) {
                 candidates.add(nodeInfo);
             }
         }
@@ -234,12 +257,12 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             return Collections.singletonList(primaryNodeId); // M3 降级单副本
         }
 
-        // 组内全部成员，primary 恒首位
+        // 组内成员拼接，primary 恒首位；排除 drained 节点（§7.2 降级表）
         List<String> members = group.getNodeIds();
         List<String> targets = new ArrayList<>();
         targets.add(primaryNodeId);
         for (String m : members) {
-            if (!m.equals(primaryNodeId)) {
+            if (!m.equals(primaryNodeId) && !drainedNodes.contains(m)) {
                 targets.add(m);
             }
         }

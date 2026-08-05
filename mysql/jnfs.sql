@@ -11,7 +11,7 @@
  Target Server Version : 80020
  File Encoding         : 65001
 
- Date: 04/08/2026 (V3 schema — 冗余存储 + Dashboard 策略/控制)
+ Date: 05/08/2026 (V4 schema — 节点排空 node_drain 表)
 */
 
 SET NAMES utf8mb4;
@@ -28,9 +28,9 @@ CREATE TABLE `schema_version` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='schema 版本记录';
 
 -- ----------------------------
--- Records of schema_version (V3)
+-- Records of schema_version (V4)
 -- ----------------------------
-INSERT INTO `schema_version` VALUES (3, NOW());
+INSERT INTO `schema_version` VALUES (4, NOW());
 
 -- ----------------------------
 -- Table structure for node_registry
@@ -169,6 +169,18 @@ CREATE TABLE `replication_control` (
 -- Records of replication_control (seed row)
 -- ----------------------------
 INSERT IGNORE INTO `replication_control` (`id`) VALUES (1);
+
+-- ----------------------------
+-- Table structure for node_drain
+-- ----------------------------
+DROP TABLE IF EXISTS `node_drain`;
+CREATE TABLE `node_drain` (
+  `node_id` varchar(128) NOT NULL COMMENT '节点ID（关联运行时节点，非外键）',
+  `drain_status` tinyint NOT NULL DEFAULT 0 COMMENT '0=ACTIVE, 1=DRAINING',
+  `drain_at` datetime NULL DEFAULT NULL COMMENT 'DRAINING 置位时间（清除时置 NULL）',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`node_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='节点排空状态表';
 
 -- ----------------------------
 -- Registry Dashboard 鉴权用户表

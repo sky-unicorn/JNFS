@@ -2,7 +2,10 @@ package org.jnfs.registry.api;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import org.jnfs.common.SegmentedLocks;
 import org.jnfs.common.replication.ReplicationGroup;
+import org.jnfs.registry.RegistryHandler;
+import org.jnfs.registry.api.dao.NodeDrainDao;
 import org.jnfs.registry.api.dao.ReplicationControlDao;
 import org.jnfs.registry.api.dao.ReplicationGroupDao;
 import org.jnfs.registry.api.dao.ReplicationPolicyDao;
@@ -23,20 +26,25 @@ import java.util.concurrent.ConcurrentHashMap;
  * 路由分发基于 {@code exchange.getRequestURI().getPath()} 前缀匹配。
  * 所有写接口记录审计日志（§10.2）：{@code time|user|action|target|result}。
  * <p>
- * drain 状态内存维护（MVP 简化）：{@code drainedNodes} ConcurrentHashMap。
+ * drain 状态持久化到 node_drain 表（§6.1，V4），NameNode 启动时读取。
+ * drainedNodes 内存缓存仅用于 Registry 即时响应一致（选路排除在 NameNode 侧）。
  * promote 直接 SQL（跨进程可用，NameNode cache 自然反映新 primary）。
  */
 public class ReplicationApiHandler implements HttpHandler {
 
     private static final Logger LOG = LoggerFactory.getLogger(ReplicationApiHandler.class);
 
+    /** drain 操作的组级分段锁（INV-D2：按 groupId 加锁，防 TOCTOU 竞态） */
+    private static final SegmentedLocks DRAIN_LOCKS = new SegmentedLocks(128);
+
     private final ReplicationGroupDao groupDao;
     private final ReplicationPolicyDao policyDao;
     private final ReplicaTaskDao taskDao;
     private final ReplicationControlDao controlDao;
+    private final NodeDrainDao nodeDrainDao;
     private final DataSource metadataDataSource;
 
-    /** drain 状态（MVP 内存维护，二期持久化） */
+    /** drain 状态内存缓存（持久化的镜像，drain=true put / drain=false remove） */
     private final ConcurrentHashMap<String, Boolean> drainedNodes = new ConcurrentHashMap<>();
 
     public ReplicationApiHandler(DataSource metadataDataSource) {
@@ -45,6 +53,7 @@ public class ReplicationApiHandler implements HttpHandler {
         this.policyDao = new ReplicationPolicyDao(metadataDataSource);
         this.taskDao = new ReplicaTaskDao(metadataDataSource);
         this.controlDao = new ReplicationControlDao(metadataDataSource);
+        this.nodeDrainDao = new NodeDrainDao(metadataDataSource);
     }
 
     @Override
@@ -185,26 +194,117 @@ public class ReplicationApiHandler implements HttpHandler {
     }
 
     // ---- /api/nodes/{id}/drain POST ----
-    private void handleDrain(HttpExchange exchange, String nodeId, String username) throws IOException {
+    // 设计 §4 R1/R2/R3、§8、§9：持久化 + 节点存在性/组归属/online/INV-D1 校验 + 组级锁。
+    // drain=true 路径按序校验，任一失败 → audit REJECTED:<reason> + 返回对应错误码，不置位。
+    // 绝对禁止修改 file_location.replica_role（§13 Q1/Q2）。
+    private void handleDrain(HttpExchange exchange, String nodeId, String username) throws IOException, SQLException {
         // S3：仅接受 POST，防 GET 误触发清空 drain 状态
         if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
-            JsonHttpUtils.sendError(exchange, 405, "Method Not Allowed");
+            JsonHttpUtils.sendJson(exchange, 405, "{\"error\":\"METHOD_NOT_ALLOWED\"}");
             return;
         }
         String body = JsonHttpUtils.readBody(exchange);
         // S7：用正则容忍键值间空白，避免 {"drain":  true} 变体失效误判为 clear
         boolean drain = extractJsonBool(body, "drain", false);
-        if (drain) {
-            drainedNodes.put(nodeId, true);
-        } else {
+
+        // ---- drain=false 路径：无校验，直接清除 ----
+        if (!drain) {
+            nodeDrainDao.upsert(false, nodeId);
             drainedNodes.remove(nodeId);
+            audit(username, "DRAIN", nodeId, "CLEAR");
+            String json = "{\"success\":true,\"message\":\"drain status updated: DRAINING \\u2192 ACTIVE\""
+                    + ",\"nodeId\":\"" + JsonHttpUtils.escapeJson(nodeId) + "\",\"drainStatus\":\"ACTIVE\"}";
+            JsonHttpUtils.sendSuccess(exchange, json);
+            return;
         }
-        audit(username, "DRAIN", nodeId, drain ? "SET" : "CLEAR");
-        // S4：drain 仅 Registry 内存（NameNode selectReplicaTargets 不排除 drained 节点）
-        //    响应 message 注明 "marked, not yet enforced"，二期持久化到 node_registry + discovery 排除
-        String msg = drain ? "Node marked as drained (marked, not yet enforced at upload selection)"
-                           : "Node drain cleared";
-        JsonHttpUtils.sendSuccess(exchange, "{\"success\":true,\"message\":\"" + msg + "\"}");
+
+        // ---- drain=true 路径：按序校验 ----
+        Map<String, RegistryHandler.NodeInfo> dataNodes = RegistryHandler.getDataNodes();
+
+        // 1. 节点存在性
+        if (!dataNodes.containsKey(nodeId)) {
+            audit(username, "DRAIN", nodeId, "REJECTED:NODE_NOT_FOUND");
+            String json = "{\"error\":\"NODE_NOT_FOUND\",\"message\":\"" + JsonHttpUtils.escapeJson(nodeId)
+                    + " not found in node_registry\"}";
+            JsonHttpUtils.sendJson(exchange, 404, json);
+            return;
+        }
+
+        // 2. R1：节点必须属于某个冗余组（遍历 listAll 找含 nodeId 的组）
+        ReplicationGroup group = findGroupByNodeId(nodeId);
+        if (group == null) {
+            audit(username, "DRAIN", nodeId, "REJECTED:NODE_NOT_IN_GROUP");
+            String json = "{\"error\":\"NODE_NOT_IN_GROUP\",\"message\":\"节点 "
+                    + JsonHttpUtils.escapeJson(nodeId) + " 不属于任何冗余组，无法排空\"}";
+            JsonHttpUtils.sendJson(exchange, 400, json);
+            return;
+        }
+
+        // 3. R2：节点必须 online
+        if (!isOnline(dataNodes.get(nodeId))) {
+            audit(username, "DRAIN", nodeId, "REJECTED:NODE_OFFLINE");
+            String json = "{\"error\":\"NODE_OFFLINE\",\"message\":\"节点 " + JsonHttpUtils.escapeJson(nodeId)
+                    + " 已离线，离线节点自动从选路排除，无需 drain\"}";
+            JsonHttpUtils.sendJson(exchange, 409, json);
+            return;
+        }
+
+        // 4. R3 / INV-D1（组级锁内做，防 TOCTOU）
+        String groupId = group.getGroupId();
+        synchronized (DRAIN_LOCKS.getLock(groupId)) {
+            // 重算组内 alive 数（online && 当前未 draining；目标节点当前未排空，算 alive）
+            Set<String> drainingKeys = nodeDrainDao.listDraining().keySet();
+            int currentAlive = 0;
+            for (String m : group.getNodeIds()) {
+                RegistryHandler.NodeInfo info = dataNodes.get(m);
+                if (info == null || !isOnline(info)) {
+                    continue; // 离线
+                }
+                if (drainingKeys.contains(m)) {
+                    continue; // 已排空
+                }
+                currentAlive++;
+            }
+            int wouldBeAlive = currentAlive - 1; // 目标当前 alive 才减 1
+            if (wouldBeAlive < 1) {
+                audit(username, "DRAIN", nodeId, "REJECTED:GROUP_WOULD_BE_EMPTY");
+                String json = "{\"error\":\"GROUP_WOULD_BE_EMPTY\",\"message\":\"排空节点 "
+                        + JsonHttpUtils.escapeJson(nodeId) + " 后，组 " + JsonHttpUtils.escapeJson(groupId)
+                        + " 将无 alive 节点可用。请先扩组或迁移数据。\",\"groupId\":\""
+                        + JsonHttpUtils.escapeJson(groupId) + "\",\"currentAliveCount\":" + currentAlive
+                        + ",\"wouldBeAliveCount\":" + wouldBeAlive
+                        + ",\"hint\":\"请先扩组或迁移数据\"}";
+                JsonHttpUtils.sendJson(exchange, 409, json);
+                return;
+            }
+
+            // 校验通过：持久化 + 内存置位 + 审计
+            nodeDrainDao.upsert(true, nodeId);
+            drainedNodes.put(nodeId, true);
+            audit(username, "DRAIN", nodeId, "SET");
+            String json = "{\"success\":true,\"message\":\"drain status updated: ACTIVE \\u2192 DRAINING"
+                    + " (NameNode restart required for routing exclusion)\""
+                    + ",\"nodeId\":\"" + JsonHttpUtils.escapeJson(nodeId) + "\",\"drainStatus\":\"DRAINING\"}";
+            JsonHttpUtils.sendSuccess(exchange, json);
+        }
+    }
+
+    /** 遍历全部冗余组，返回含 nodeId 的组；无则 null（用于 R1 校验） */
+    private ReplicationGroup findGroupByNodeId(String nodeId) throws SQLException {
+        for (ReplicationGroup g : groupDao.listAll()) {
+            if (g.getNodeIds().contains(nodeId)) {
+                return g;
+            }
+        }
+        return null;
+    }
+
+    /** online 判定（§2.2）：节点存在且心跳未超时 */
+    private static boolean isOnline(RegistryHandler.NodeInfo info) {
+        if (info == null) {
+            return false;
+        }
+        return (System.currentTimeMillis() - info.lastHeartbeatTime) < RegistryHandler.heartbeatTimeout;
     }
 
     // ---- /api/nodes/{id}/promote POST ----

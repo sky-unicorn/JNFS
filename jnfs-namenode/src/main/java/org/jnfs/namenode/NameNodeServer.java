@@ -434,8 +434,41 @@ public class NameNodeServer {
         // 注入对账同步调度器到 Handler（DATA_REPLICA_COMMIT 登记时使用）
         NameNodeHandler.initReplicaSyncScheduler(replicaSyncScheduler);
 
+        // 注入排空节点集合到 Handler（§6.2：mysql 模式从 node_drain 表加载，file 模式传空集）
+        if (metadataManager instanceof MySQLMetadataManager) {
+            java.util.Set<String> drained = loadDrainedNodes(
+                    ((MySQLMetadataManager) metadataManager).getDataSource());
+            NameNodeHandler.initDrainedNodes(drained);
+        } else {
+            NameNodeHandler.initDrainedNodes(java.util.Collections.emptySet());
+        }
+
         new NameNodeServer(port, advertisedHost, nodeId, registryAddresses,
                 replicationGroupStore, replicaSyncScheduler).run();
+    }
+
+    /**
+     * 启动期加载排空节点集合（§6.2）。
+     * <p>
+     * 读 node_drain 表 drain_status=1 的 node_id，装入 HashSet 返回。
+     * 读失败仅 warn 并返回空集——drain 是运维态，读失败不应阻断 NameNode 启动。
+     *
+     * @param ds 元数据库 DataSource（mysql 模式）
+     * @return drain_status=1 的 node_id 集合；读失败返回空集
+     */
+    private static java.util.Set<String> loadDrainedNodes(javax.sql.DataSource ds) {
+        java.util.Set<String> result = new java.util.HashSet<>();
+        try (java.sql.Connection conn = ds.getConnection();
+             java.sql.PreparedStatement stmt = conn.prepareStatement(
+                     "SELECT node_id FROM node_drain WHERE drain_status = 1");
+             java.sql.ResultSet rs = stmt.executeQuery()) {
+            while (rs.next()) {
+                result.add(rs.getString("node_id"));
+            }
+        } catch (Exception e) {
+            LOG.error("加载 drained 节点集合失败，drainedNodes 将为空（不阻断启动）: {}", e.getMessage(), e);
+        }
+        return result;
     }
 
     /**

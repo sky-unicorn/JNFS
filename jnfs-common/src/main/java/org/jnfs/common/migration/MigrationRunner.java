@@ -31,7 +31,7 @@ public final class MigrationRunner {
     private static final Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
 
     /** 当前目标版本（代码所期望的最新 schema 版本） */
-    public static final int CURRENT_VERSION = 3;
+    public static final int CURRENT_VERSION = 4;
 
     /** file 模式版本文件名 */
     public static final String META_VERSION_FILE = "meta_version";

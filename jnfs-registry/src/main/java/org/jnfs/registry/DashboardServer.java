@@ -141,6 +141,7 @@ public class DashboardServer {
 
     private String getNodesJson() {
         Map<String, RegistryHandler.NodeInfo> nodes = RegistryHandler.getDataNodes();
+        Map<String, long[]> drainStatusMap = loadDrainStatus(); // nodeId → [drainStatus, drainAt]
         StringBuilder sb = new StringBuilder();
         sb.append("[");
         int i = 0;
@@ -148,19 +149,51 @@ public class DashboardServer {
         for (Map.Entry<String, RegistryHandler.NodeInfo> entry : nodes.entrySet()) {
             if (i > 0) sb.append(",");
             RegistryHandler.NodeInfo info = entry.getValue();
+            long[] drain = drainStatusMap.get(info.nodeId);
+            int drainStatus = (drain != null) ? (int) drain[0] : 0;
+            long drainAtMs = (drain != null) ? drain[1] : -1L;
             sb.append("{");
             sb.append("\"nodeId\":\"").append(escapeJson(info.nodeId)).append("\",");
             sb.append("\"address\":\"").append(escapeJson(info.address)).append("\",");
             sb.append("\"freeSpace\":").append(info.freeSpace).append(",");
             sb.append("\"lastHeartbeat\":").append(info.lastHeartbeatTime).append(",");
             // 服务端计算状态，避免客户端时间不一致导致误判
+            // status 仍按心跳客观判定 online/offline；drain 叠加在 online 上，靠 drainStatus 驱动徽标
             boolean isOnline = (now - info.lastHeartbeatTime) < RegistryHandler.heartbeatTimeout;
-            sb.append("\"status\":\"").append(isOnline ? "online" : "offline").append("\"");
+            sb.append("\"status\":\"").append(isOnline ? "online" : "offline").append("\",");
+            sb.append("\"drainStatus\":").append(drainStatus).append(",");
+            sb.append("\"drainAt\":").append(drainAtMs >= 0 ? Long.toString(drainAtMs) : "null");
             sb.append("}");
             i++;
         }
         sb.append("]");
         return sb.toString();
+    }
+
+    /**
+     * 从 node_drain 表加载排空状态（服务端权威）。
+     * 返回 nodeId → [drainStatus(0/1), drainAt(毫秒,-1表示null)] 的映射。
+     * file 模式（metadataDataSource==null）直接返回空 map。
+     * SQLException 记 warn，不阻断渲染。
+     */
+    private Map<String, long[]> loadDrainStatus() {
+        if (metadataDataSource == null) return Map.of();
+        try (var conn = metadataDataSource.getConnection();
+             var ps = conn.prepareStatement("SELECT node_id, drain_status, drain_at FROM node_drain WHERE drain_status=1");
+             var rs = ps.executeQuery()) {
+            Map<String, long[]> result = new java.util.HashMap<>();
+            while (rs.next()) {
+                String nodeId = rs.getString("node_id");
+                int drainStatus = rs.getInt("drain_status");
+                java.sql.Timestamp drainAtTs = rs.getTimestamp("drain_at");
+                long drainAtMs = (drainAtTs != null) ? drainAtTs.getTime() : -1L;
+                result.put(nodeId, new long[]{drainStatus, drainAtMs});
+            }
+            return result;
+        } catch (java.sql.SQLException e) {
+            LOG.warn("查询 node_drain 表失败，排空状态不可用", e);
+            return Map.of();
+        }
     }
 
     private static String escapeJson(String s) {
@@ -717,7 +750,6 @@ public class DashboardServer {
     /* ===================== 全局状态 ===================== */
     var allNodes = [];          // 缓存 /api/nodes 最新结果
     var allGroups = [];         // 缓存 /api/replication/groups 最新结果
-    var drainedNodes = {};      // 客户端记录已排空节点（/api/nodes 不回传排空态，见回报说明）
     var policyLoaded = false;   // 同步策略仅加载一次
     var currentTopTab = 'tab-nodes';
     var currentSubTab = 'tab-groups';
@@ -740,6 +772,13 @@ public class DashboardServer {
             .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     }
     function hostOf(address) { return (address || '').split(':')[0]; }
+    /** 判断节点是否属于某个冗余组（R1：非冗余组节点不显示排空按钮） */
+    function nodeInAnyGroup(nodeId) {
+        for (var i = 0; i < allGroups.length; i++) {
+            if ((allGroups[i].nodeIds || []).indexOf(nodeId) >= 0) return true;
+        }
+        return false;
+    }
 
     /* —— Toast —— */
     function showToast(msg, type) {
@@ -862,49 +901,75 @@ public class DashboardServer {
 
     /* ===================== 节点监控（§16.2） ===================== */
     function loadNodes() {
+        // R1：若 allGroups 未加载，先拉取冗余组再渲染（避免竞态）
+        var groupsReady = allGroups.length > 0;
+        var groupsPromise = groupsReady ? Promise.resolve() : apiGet('/api/replication/groups').then(function(d) {
+            if (d) allGroups = d.groups || [];
+        }).catch(function(){});
+
         apiGet('/api/nodes').then(function(data) {
             if (!data) return;
             allNodes = data;
-            var tbody = document.querySelector('#nodeTable tbody');
-            var activeCount = 0, totalSpace = 0;
-            if (data.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="empty-row">暂无节点连接</td></tr>';
-            } else {
-                var html = '';
-                data.forEach(function(node) {
-                    var isOnline = node.status === 'online';
-                    var draining = !!drainedNodes[node.nodeId];
-                    if (isOnline && !draining) { activeCount++; totalSpace += node.freeSpace; }
-                    var badge;
-                    if (draining) {
-                        badge = '<span class="status-badge status-draining">排空中</span>';
-                    } else if (isOnline) {
-                        badge = '<span class="status-badge status-online">在线</span>';
-                    } else {
-                        badge = '<span class="status-badge status-offline">离线</span>';
-                    }
-                    var drainDisabled = (!isOnline || draining) ? 'disabled' : '';
-                    var drainLabel = draining ? '排空中' : '排空';
-                    html += '<tr>'
-                        + '<td>' + escapeHtml(node.nodeId || '-') + '</td>'
-                        + '<td>' + escapeHtml(node.address || '-') + '</td>'
-                        + '<td>' + formatBytes(node.freeSpace) + '</td>'
-                        + '<td>' + new Date(node.lastHeartbeat).toLocaleString() + '</td>'
-                        + '<td>' + badge + '</td>'
-                        + '<td>'
-                        +   '<button class="action-btn" ' + drainDisabled + ' onclick="drainNode(\\'' + escapeHtml(node.nodeId) + '\\')">' + drainLabel + '</button>'
-                        +   '<button class="action-btn success" onclick="promoteNode(\\'' + escapeHtml(node.nodeId) + '\\')">晋升</button>'
-                        + '</td>'
-                        + '</tr>';
-                });
-                tbody.innerHTML = html;
-            }
-            document.getElementById('activeNodes').innerText = activeCount;
-            document.getElementById('totalFreeSpace').innerText = formatBytes(totalSpace);
+            // 等冗余组数据就绪后再渲染（若已就绪则 groupsPromise 立即 resolve）
+            groupsPromise.then(function() { renderNodes(data); });
         }).catch(function(err) {
             document.querySelector('#nodeTable tbody').innerHTML =
                 '<tr><td colspan="6" class="empty-row" style="color:red">无法连接到服务器</td></tr>';
         });
+    }
+    function renderNodes(data) {
+        var tbody = document.querySelector('#nodeTable tbody');
+        var activeCount = 0, totalSpace = 0;
+        if (data.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="empty-row">暂无节点连接</td></tr>';
+        } else {
+            var html = '';
+            data.forEach(function(node) {
+                var isOnline = node.status === 'online';
+                var isDraining = node.drainStatus === 1;
+                // activeCount/totalSpace：online 且 drainStatus!=1 才计入（drain 节点不算"活跃存储节点"）
+                if (isOnline && !isDraining) { activeCount++; totalSpace += node.freeSpace; }
+                // 徽标：online+drainStatus=1 → 排空中(橙)；online → 在线(绿)；否则离线(灰)
+                var badge;
+                if (isOnline && isDraining) {
+                    badge = '<span class="status-badge status-draining">排空中</span>';
+                } else if (isOnline) {
+                    badge = '<span class="status-badge status-online">在线</span>';
+                } else {
+                    badge = '<span class="status-badge status-offline">离线</span>';
+                }
+                // R1：非冗余组节点隐藏排空按钮；offline 节点禁用排空按钮
+                var inGroup = nodeInAnyGroup(node.nodeId);
+                var drainBtn = '';
+                if (!inGroup) {
+                    // 非冗余组节点：不渲染排空按钮（设计 §4 R1）
+                    drainBtn = '';
+                } else if (isDraining) {
+                    // DRAINING 节点：显示"恢复"按钮
+                    drainBtn = '<button class="action-btn success" onclick="recoverNode(\\'' + escapeHtml(node.nodeId) + '\\')">恢复</button>';
+                } else if (isOnline) {
+                    // ACTIVE+online+在组内：显示"排空"按钮
+                    drainBtn = '<button class="action-btn" onclick="drainNode(\\'' + escapeHtml(node.nodeId) + '\\')">排空</button>';
+                } else {
+                    // offline 节点：禁用排空按钮
+                    drainBtn = '<button class="action-btn" disabled>排空</button>';
+                }
+                html += '<tr>'
+                    + '<td>' + escapeHtml(node.nodeId || '-') + '</td>'
+                    + '<td>' + escapeHtml(node.address || '-') + '</td>'
+                    + '<td>' + formatBytes(node.freeSpace) + '</td>'
+                    + '<td>' + new Date(node.lastHeartbeat).toLocaleString() + '</td>'
+                    + '<td>' + badge + '</td>'
+                    + '<td>'
+                    +   drainBtn
+                    +   (inGroup ? '<button class="action-btn success" onclick="promoteNode(\\'' + escapeHtml(node.nodeId) + '\\')">晋升</button>' : '')
+                    + '</td>'
+                    + '</tr>';
+            });
+            tbody.innerHTML = html;
+        }
+        document.getElementById('activeNodes').innerText = activeCount;
+        document.getElementById('totalFreeSpace').innerText = formatBytes(totalSpace);
     }
     function loadSecurity() {
         apiGet('/api/security').then(function(data) {
@@ -916,17 +981,32 @@ public class DashboardServer {
         }).catch(function(){});
     }
 
-    /* —— 排空节点（§16.10 流程 2） —— */
+    /* —— 排空节点（§4 R6 文案 / §13 Q1：仅标记，不迁角色） —— */
     function drainNode(nodeId) {
-        showConfirm('确认排空节点', '将节点 <b>' + escapeHtml(nodeId) + '</b> 标记为排空？<br>排空后新上传不再选中该节点（已标记，下次选路生效），不影响已有数据。',
+        var msg = '将节点 <b>' + escapeHtml(nodeId) + '</b> 标记为排空？<br>'
+            + '· 后续上传不再选中该节点（新写入选路排除）<br>'
+            + '· 已有数据可继续读（读可用性不受影响）<br>'
+            + '· 物理数据由同步任务后台搬运，本操作不删除数据';
+        showConfirm('确认排空节点', msg,
             function() {
                 apiPost('/api/nodes/' + encodeURIComponent(nodeId) + '/drain', { drain: true })
                     .then(function(res) {
-                        drainedNodes[nodeId] = true;
                         showToast(res.message || '已标记排空', 'success');
                         loadNodes();
                     })
                     .catch(function(err){ showToast('排空失败: ' + err.message, 'error'); });
+            });
+    }
+    /* —— 恢复节点（POST drain:false，清除 DRAINING 状态） —— */
+    function recoverNode(nodeId) {
+        showConfirm('确认恢复节点', '取消节点 <b>' + escapeHtml(nodeId) + '</b> 的排空状态？<br>该节点将重新进入新上传的选路候选。',
+            function() {
+                apiPost('/api/nodes/' + encodeURIComponent(nodeId) + '/drain', { drain: false })
+                    .then(function(res) {
+                        showToast(res.message || '已恢复', 'success');
+                        loadNodes();
+                    })
+                    .catch(function(err){ showToast('恢复失败: ' + err.message, 'error'); });
             });
     }
 
@@ -982,7 +1062,18 @@ public class DashboardServer {
                     hostCount[h] = (hostCount[h] || 0) + 1;
                     if (hostCount[h] > 1) dup = true;
                 });
-                var statusBadge = dup
+                // 冗余度降级检测（§4 R6 / §10.2）：组内 alive(online && !draining) < 组大小
+                var aliveCount = 0;
+                ids.forEach(function(id){
+                    var n = nodeMap[id];
+                    if (n && n.status === 'online' && n.drainStatus !== 1) aliveCount++;
+                });
+                var degraded = aliveCount < ids.length;
+                var statusBadge = '';
+                if (degraded) {
+                    statusBadge += '<span class="status-badge status-draining" title="组内可服务节点少于组大小">⚠ 冗余降级 (' + aliveCount + '/' + ids.length + ')</span> ';
+                }
+                statusBadge += dup
                     ? '<span class="status-badge status-draining">⚠ 同主机</span>'
                     : '<span class="status-badge status-online">正常</span>';
                 var chips = ids.map(function(id){
