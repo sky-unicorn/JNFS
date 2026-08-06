@@ -38,3 +38,4 @@ CLAUDE.md
 docs/design/upgrade-migration-architecture.md
 dashboard_users.properties
 dist-test/**
+docs/design/**
