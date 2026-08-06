@@ -39,7 +39,7 @@ public class MysqlV2ToV3 implements MigrationStep {
 
     @Override
     public boolean supports(StorageMode mode) {
-        return mode == StorageMode.MYSQL;
+        return mode == StorageMode.MYSQL || mode == StorageMode.H2;
     }
 
     @Override
@@ -51,7 +51,7 @@ public class MysqlV2ToV3 implements MigrationStep {
     public String migrate(MigrationContext ctx) throws Exception {
         DataSource ds = ctx.dataSource();
         if (ds == null) {
-            return "MySQL mode requires a DataSource";
+            return ctx.mode() + " mode requires a DataSource";
         }
 
         try (Connection conn = ds.getConnection()) {
@@ -68,7 +68,7 @@ public class MysqlV2ToV3 implements MigrationStep {
             return null;
         } catch (SQLException e) {
             LOG.error("MysqlV2ToV3: 迁移失败", e);
-            return "MySQL migration V2→V3 failed: " + e.getMessage();
+            return ctx.mode() + " migration V2→V3 failed: " + e.getMessage();
         }
     }
 

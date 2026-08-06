@@ -25,9 +25,11 @@
         <hutool.version>5.8.20</hutool.version>
         <snakeyaml.version>2.0</snakeyaml.version>
         <mysql.version>8.0.33</mysql.version>
+        <h2.version>2.2.224</h2.version>
         <hikaricp.version>5.0.1</hikaricp.version>
         <slf4j.version>2.0.7</slf4j.version>
         <logback.version>1.4.11</logback.version>
+        <junit.version>5.10.1</junit.version>
     </properties>
     <distributionManagement>
         <repository>
@@ -75,6 +77,11 @@
                 <version>${mysql.version}</version>
             </dependency>
             <dependency>
+                <groupId>com.h2database</groupId>
+                <artifactId>h2</artifactId>
+                <version>${h2.version}</version>
+            </dependency>
+            <dependency>
                 <groupId>com.zaxxer</groupId>
                 <artifactId>HikariCP</artifactId>
                 <version>${hikaricp.version}</version>
@@ -88,6 +95,12 @@
                 <groupId>ch.qos.logback</groupId>
                 <artifactId>logback-classic</artifactId>
                 <version>${logback.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter</artifactId>
+                <version>${junit.version}</version>
+                <scope>test</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>

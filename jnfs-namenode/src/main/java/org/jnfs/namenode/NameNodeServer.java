@@ -32,6 +32,7 @@ import org.jnfs.common.SecurityUtil;
 import org.jnfs.common.migration.MigrationResult;
 import org.jnfs.common.migration.MigrationRunner;
 import org.jnfs.common.migration.StorageMode;
+import org.jnfs.namenode.migration.FileToH2Importer;
 import org.jnfs.namenode.migration.FileToMysqlImporter;
 import org.jnfs.namenode.replication.ReplicationGroupStore;
 import org.slf4j.Logger;
@@ -85,15 +86,20 @@ public class NameNodeServer {
     // 夜间对账同步调度器（mysql 模式专用，file 模式为 null）
     private final org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler;
 
+    // 元数据管理器（用于 shutdown 时关闭 DataSource）
+    private final MetadataManager metadataManager;
+
     public NameNodeServer(int port, String advertisedHost, String nodeId, List<InetSocketAddress> registryAddresses,
                           ReplicationGroupStore replicationGroupStore,
-                          org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler) {
+                          org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler,
+                          MetadataManager metadataManager) {
         this.port = port;
         this.advertisedHost = advertisedHost;
         this.nodeId = nodeId;
         this.registryAddresses = registryAddresses;
         this.replicationGroupStore = replicationGroupStore;
         this.replicaSyncScheduler = replicaSyncScheduler;
+        this.metadataManager = metadataManager;
 
         // 初始化共享的 Worker Group
         this.workerGroup = new NioEventLoopGroup();
@@ -161,6 +167,17 @@ public class NameNodeServer {
                 replicationGroupStore.shutdown();
             } catch (Exception e) {
                 LOG.warn("关闭 ReplicationGroupStore 失败", e);
+            }
+        }
+        // 关闭 JDBC 元数据 DataSource（mysql/H2 共享池；H2 单进程文件锁必须在进程退出前释放）
+        if (metadataManager != null && metadataManager.isJdbcBacked()) {
+            try {
+                javax.sql.DataSource ds = metadataManager.getDataSource();
+                if (ds instanceof com.zaxxer.hikari.HikariDataSource hds && !hds.isClosed()) {
+                    hds.close();
+                }
+            } catch (Exception e) {
+                LOG.warn("关闭元数据 DataSource 失败", e);
             }
         }
         ServerShutdownHelper.shutdownAll(LOG, "NameNodeServer", running,
@@ -316,10 +333,11 @@ public class NameNodeServer {
         }
         String mode = storageCfg.mode;
         StorageMode storageMode = StorageMode.fromConfig(mode);
-        LOG.info("storage 模式: {}, mysql={}", mode,
+        LOG.info("storage 模式: {}, mysql={}, h2Path={}", mode,
                 "mysql".equalsIgnoreCase(mode)
                         ? storageCfg.mysqlHost + ":" + storageCfg.mysqlPort + "/" + storageCfg.mysqlDatabase
-                        : "n/a");
+                        : "n/a",
+                storageCfg.h2Path == null || storageCfg.h2Path.isEmpty() ? "(DataDirResolver默认)" : storageCfg.h2Path);
 
         // 读取缓存配置（本地 JVM 调优，从顶层 cache 段读取，与存储模式无关）
         if (config.containsKey("cache")) {
@@ -377,7 +395,7 @@ public class NameNodeServer {
                 }
                 try {
                     FileToMysqlImporter.importIfApplicable(
-                            dataDir, ((MySQLMetadataManager) metadataManager).getDataSource());
+                            dataDir, metadataManager.getDataSource());
                 } catch (Exception e) {
                     LOG.error("file→mysql 自动导入失败，拒绝启动。原因: {}", e.getMessage(), e);
                     System.exit(2);
@@ -386,7 +404,7 @@ public class NameNodeServer {
 
             // 冗余组配置缓存（mysql 模式专用，决策 9：NameNode 定期从 mysql 加载冗余组定义）
             replicationGroupStore = new ReplicationGroupStore(
-                    ((MySQLMetadataManager) metadataManager).getDataSource());
+                    metadataManager.getDataSource());
             replicationGroupStore.start();
             LOG.info("冗余组配置缓存已启动（mysql 模式，多副本启用）");
 
@@ -396,7 +414,7 @@ public class NameNodeServer {
             // 替代方案：直接在构造前创建 EventLoopGroup 传给 scheduler。
             io.netty.channel.EventLoopGroup syncWorkerGroup = new io.netty.channel.nio.NioEventLoopGroup();
             replicaSyncScheduler = new org.jnfs.namenode.replication.ReplicaSyncScheduler(
-                    ((MySQLMetadataManager) metadataManager).getDataSource(),
+                    metadataManager.getDataSource(),
                     replicationGroupStore,
                     advertisedHost, port,
                     syncWorkerGroup,
@@ -404,17 +422,70 @@ public class NameNodeServer {
             replicaSyncScheduler.start();
             LOG.info("对账同步调度器已启动（mysql 模式）");
         } else {
-            LOG.info("使用本地文件元数据存储");
+            // --- H2 嵌入式文件库分支（file 模式退役，旧 file 配置经 StorageMode.fromConfig 落到 H2） ---
+            LOG.info("使用 H2 嵌入式文件库元数据存储（file 模式已退役）");
 
-            // 运行迁移（在创建 MetadataManager 之前，因为迁移会修改日志文件）
-            MigrationResult migrationResult = MigrationRunner.run(storageMode, dataDir, null);
-            if (migrationResult.isFailed()) {
-                LOG.error("数据迁移失败，拒绝启动。原因: {}", migrationResult.getMessage());
-                System.exit(2);
+            File logFile = new File(dataDir, MigrationRunner.METADATA_LOG_FILE);
+            boolean hasFileLog = logFile.exists();
+
+            // 1. 若存在 file 历史日志，先规整为 V1（FileV0ToV1 补稳定 storageId）
+            if (hasFileLog) {
+                MigrationResult fileMigration = MigrationRunner.run(StorageMode.FILE, dataDir, null);
+                if (fileMigration.isFailed()) {
+                    LOG.error("file 日志迁移失败，拒绝启动。原因: {}", fileMigration.getMessage());
+                    System.exit(2);
+                }
+                LOG.info("file 日志已规整: {}", fileMigration.getMessage());
             }
-            LOG.info("数据迁移: {}", migrationResult.getMessage());
 
-            metadataManager = new MetadataManager();
+            // 2. 建单一 H2 数据源（迁移 + 业务共用，生命周期由 H2MetadataManager 接管）
+            //    h2Path 非空则用之，空则 DataDirResolver 默认解析（与 StorageConfig 7 字段契约一致）
+            File h2Dir = (storageCfg.h2Path != null && !storageCfg.h2Path.isEmpty())
+                    ? new File(storageCfg.h2Path)
+                    : dataDir;
+            if (!h2Dir.exists() && !h2Dir.mkdirs()) {
+                LOG.error("H2 数据目录不存在且无法创建: {}，拒绝启动", h2Dir.getAbsolutePath());
+                System.exit(2);
+                return; // unreachable，仅为编译器满足
+            }
+            com.zaxxer.hikari.HikariDataSource h2Ds = null;
+            try {
+                h2Ds = H2MetadataManager.createLocalDataSource(h2Dir);
+
+                // 3. H2 迁移链：建 schema_version + 全部表，写版本 5
+                //    dataDir（APP_HOME）传入仅用于 file 模式步骤占位；H2 步骤只用 dataSource
+                MigrationResult h2Migration = MigrationRunner.run(StorageMode.H2, dataDir, h2Ds);
+                if (h2Migration.isFailed()) {
+                    LOG.error("H2 数据迁移失败，拒绝启动。原因: {}", h2Migration.getMessage());
+                    System.exit(2);
+                    return; // unreachable，仅为编译器满足
+                }
+                LOG.info("H2 数据迁移: {}", h2Migration.getMessage());
+
+                // 4. file→H2 自动导入（log 存在且无 file_to_h2_imported 标记；per-row 幂等 + 原子标记）
+                if (hasFileLog) {
+                    try {
+                        FileToH2Importer.importIfApplicable(dataDir, h2Ds);
+                    } catch (Exception e) {
+                        LOG.error("file→H2 自动导入失败，拒绝启动。原因: {}", e.getMessage(), e);
+                        System.exit(2);
+                        return; // unreachable，仅为编译器满足
+                    }
+                }
+
+                // 5. 构造 H2MetadataManager（父类构造时执行锚点表 DDL 兜底）
+                metadataManager = new H2MetadataManager(h2Ds);
+            } catch (Exception e) {
+                LOG.error("H2 初始化失败，拒绝启动。原因: {}", e.getMessage(), e);
+                if (h2Ds != null) {
+                    h2Ds.close();
+                }
+                System.exit(2);
+                return; // unreachable，仅为编译器满足
+            }
+
+            // 不删 namenode_meta.log：作为回滚安全网 + FileToH2Importer 导入源，保留原始文件
+            // 冗余组件（ReplicationGroupStore / ReplicaSyncScheduler）保持 null：H2 单副本短路
         }
 
         // --- 初始化 MetadataCacheManager ---
@@ -434,17 +505,16 @@ public class NameNodeServer {
         // 注入对账同步调度器到 Handler（DATA_REPLICA_COMMIT 登记时使用）
         NameNodeHandler.initReplicaSyncScheduler(replicaSyncScheduler);
 
-        // 注入排空节点集合到 Handler（§6.2：mysql 模式从 node_drain 表加载，file 模式传空集）
-        if (metadataManager instanceof MySQLMetadataManager) {
-            java.util.Set<String> drained = loadDrainedNodes(
-                    ((MySQLMetadataManager) metadataManager).getDataSource());
+        // 注入排空节点集合到 Handler（§6.2：JDBC 模式从 node_drain 表加载；H2 无数据返回空集合，安全）
+        if (metadataManager.isJdbcBacked()) {
+            java.util.Set<String> drained = loadDrainedNodes(metadataManager.getDataSource());
             NameNodeHandler.initDrainedNodes(drained);
         } else {
             NameNodeHandler.initDrainedNodes(java.util.Collections.emptySet());
         }
 
         new NameNodeServer(port, advertisedHost, nodeId, registryAddresses,
-                replicationGroupStore, replicaSyncScheduler).run();
+                replicationGroupStore, replicaSyncScheduler, metadataManager).run();
     }
 
     /**
@@ -559,41 +629,69 @@ public class NameNodeServer {
 
     /**
      * 从 Registry 拉取的存储配置（值对象，不可变）。
+     * <p>
+     * 7 字段契约（与 {@code jnfs-registry} {@code serializeStorageConfig} 严格一致）：
+     * {@code mode|mysqlHost|mysqlPort|mysqlDatabase|mysqlUser|mysqlPassword|h2Path}
+     * <ul>
+     *   <li>mysql 模式：{@code mysql|host|port|db|user|password|}（第 7 位 h2Path 为空）</li>
+     *   <li>h2 模式：{@code h2||||||<h2Path 或空>}（2-6 位为空；第 7 位为 h2 路径，空表示
+     *       NameNode 侧用 {@code DataDirResolver} 默认解析）</li>
+     *   <li>file（已退役）/其它：7 字段按 file-like 处理</li>
+     * </ul>
+     * 向后兼容：旧 6 字段 payload 缺第 7 位，h2Path 视为空。
      */
     private static final class StorageConfig {
-        final String mode;          // "file" | "mysql"
+        final String mode;          // "file" | "mysql" | "h2"
         final String mysqlHost;
         final int mysqlPort;
         final String mysqlDatabase;
         final String mysqlUser;
         final String mysqlPassword;
+        final String h2Path;        // h2 模式下的 h2 文件库路径；空 = DataDirResolver 默认解析
 
         StorageConfig(String mode, String mysqlHost, int mysqlPort, String mysqlDatabase,
-                      String mysqlUser, String mysqlPassword) {
+                      String mysqlUser, String mysqlPassword, String h2Path) {
             this.mode = mode;
             this.mysqlHost = mysqlHost;
             this.mysqlPort = mysqlPort;
             this.mysqlDatabase = mysqlDatabase;
             this.mysqlUser = mysqlUser;
             this.mysqlPassword = mysqlPassword;
+            this.h2Path = h2Path;
         }
 
         /**
-         * 解析管道分隔 payload：{@code mode|mysqlHost|mysqlPort|mysqlDatabase|mysqlUser|mysqlPassword}
-         * file 模式 payload 为 {@code file|||||}（后 5 字段空）。
+         * 解析 7 字段 payload：{@code mode|mysqlHost|mysqlPort|mysqlDatabase|mysqlUser|mysqlPassword|h2Path}
+         * <p>
+         * 用 {@code split("\\|", -1)} 保留尾空串，确保第 7 位 h2Path 存在时能被读出。
+         * 向后兼容：旧 6 字段 payload 缺第 7 位，h2Path 视为空。
          */
         static StorageConfig parse(String payload) {
-            String[] parts = payload.split("\\|");
+            String[] parts = payload.split("\\|", -1);
+            // 反转义：unesc 会跳过未转义的 pipe（split 后不会出现在字段值中）
+            // 但字段内通过 Registry 侧 esc() 转义为 \| 的 pipe 需还原
             String mode = parts[0];
-            if (!"mysql".equalsIgnoreCase(mode)) {
-                return new StorageConfig(mode, null, 0, null, null, null);
+            if ("mysql".equalsIgnoreCase(mode)) {
+                String host = unesc((parts.length > 1 && !parts[1].isEmpty()) ? parts[1] : "localhost");
+                int port = parts.length > 2 ? parseIntSafe(parts[2], 3306) : 3306;
+                String db = unesc((parts.length > 3 && !parts[3].isEmpty()) ? parts[3] : "jnfs");
+                String user = unesc((parts.length > 4 && !parts[4].isEmpty()) ? parts[4] : "root");
+                String password = unesc(parts.length > 5 ? parts[5] : "");
+                String h2 = unesc(parts.length >= 7 ? parts[6] : ""); // 第 7 位 h2Path（mysql 模式固定空）
+                return new StorageConfig(mode, host, port, db, user, password, h2);
             }
-            String host = parts.length > 1 ? parts[1] : "localhost";
-            int port = parts.length > 2 ? parseIntSafe(parts[2], 3306) : 3306;
-            String db = parts.length > 3 ? parts[3] : "jnfs";
-            String user = parts.length > 4 ? parts[4] : "root";
-            String password = parts.length > 5 ? parts[5] : "";
-            return new StorageConfig(mode, host, port, db, user, password);
+            // h2 / file / 其它：mysql 字段忽略，仅第 7 位 h2Path 有意义
+            String h2 = unesc(parts.length >= 7 ? parts[6] : "");
+            return new StorageConfig(mode, null, 0, null, null, null, h2);
+        }
+
+        /**
+         * 反转义：Registry 侧 {@code esc()} 将字段值内的 {@code |} 转义为 {@code \\|}。
+         * split("\\|", -1) 不会拆开 {@code \\|} 中的 pipe（因为紧随反斜杠），故反转义只需
+         * 把 {@code \\|} 替换回 {@code |}。
+         */
+        private static String unesc(String v) {
+            return v == null ? "" : v.replace("\\|", "|");
         }
 
         private static int parseIntSafe(String s, int def) {

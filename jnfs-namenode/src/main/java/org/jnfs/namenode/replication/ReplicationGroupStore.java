@@ -46,7 +46,7 @@ public class ReplicationGroupStore {
     }
 
     /**
-     * @param dataSource            元数据库数据源（来自 MySQLMetadataManager.getDataSource()）
+     * @param dataSource            元数据库数据源（来自 JdbcMetadataManager.getDataSource()）
      * @param refreshIntervalSeconds 定时刷新间隔（秒）
      */
     public ReplicationGroupStore(DataSource dataSource, long refreshIntervalSeconds) {

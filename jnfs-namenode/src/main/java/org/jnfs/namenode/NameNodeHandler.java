@@ -88,42 +88,34 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     /**
      * 初始化元数据管理器 (由 NameNodeServer 启动时调用)
+     * <p>
+     * file 模式已退役，运行时只存在 JDBC 支撑的实例（mysql / h2）。
+     * 两类实例均走懒加载（cache miss → queryByHash），不做全量 recover 灌内存；
+     * H2 经 queryByHash 返回真实 filename，旧的 "loaded_from_file" 占位缺陷自然消除。
      */
     public static void initMetadataManager(MetadataManager manager, MetadataCacheManager cache) throws java.io.IOException {
         metadataManager = manager;
         cacheManager = cache;
-        
-        // 恢复数据到缓存 (预热)
-        // 注意：这里为了兼容，我们构建临时的 Map 接收 recover 数据，然后灌入 Cache
-        // 对于 MySQL 模式，如果数据量巨大，recover 应该被禁用或改为 limit 加载
-        Map<String, String> f2h = new HashMap<>();
-        Map<String, String> h2s = new HashMap<>();
-        Map<String, String> h2id = new HashMap<>();
-        
-        // 只有 File 模式或者配置了强制预热才执行全量 recover
-        // 这里做一个简单的判断：如果是 MySQL 模式，我们假设不再全量 recover，除非明确要求
-        boolean isFileMode = !(manager instanceof MySQLMetadataManager);
-        
-        if (isFileMode) {
-             LOG.info("File模式: 执行全量元数据恢复...");
-             manager.recover(f2h, h2s, h2id, persistedHashes);
-             
-             // 灌入 Cache
-             for (Map.Entry<String, String> entry : h2id.entrySet()) {
-                 String hash = entry.getKey();
-                 String storageId = entry.getValue();
-                 String address = h2s.get(hash);
-                 // 由于 filenameToHash 是多对一，这里反向查找有点麻烦，暂且简化
-                 // 实际上 Cache 主要以 Hash 为 Key
-                 // file 模式单副本：address 作为 primary 的 nodeId
-                 List<ReplicaLocation> locs = Collections.singletonList(
-                         new ReplicaLocation(address, ReplicaRole.PRIMARY.getCode(), ReplicaStatus.ACTIVE.getCode()));
-                 cacheManager.putCacheOnly(hash, new MetadataCacheManager.MetadataEntry(
-                     "loaded_from_file", hash, storageId, locs
-                 ));
-             }
+
+        if (manager.isJdbcBacked()) {
+            LOG.info("JDBC 模式 (mysql/h2): 跳过全量内存恢复，启用懒加载（cache miss → queryByHash）");
         } else {
-             LOG.info("MySQL模式: 跳过全量内存恢复，启用懒加载");
+            // file 模式已退役，运行时不存在非 JDBC 实例；保留兜底路径防御未来实现。
+            LOG.info("非 JDBC 模式: 执行全量元数据恢复...");
+            Map<String, String> f2h = new HashMap<>();
+            Map<String, String> h2s = new HashMap<>();
+            Map<String, String> h2id = new HashMap<>();
+            manager.recover(f2h, h2s, h2id, persistedHashes);
+            for (Map.Entry<String, String> entry : h2id.entrySet()) {
+                String hash = entry.getKey();
+                String storageId = entry.getValue();
+                String address = h2s.get(hash);
+                List<ReplicaLocation> locs = Collections.singletonList(
+                        new ReplicaLocation(address, ReplicaRole.PRIMARY.getCode(), ReplicaStatus.ACTIVE.getCode()));
+                cacheManager.putCacheOnly(hash, new MetadataCacheManager.MetadataEntry(
+                    "loaded_from_file", hash, storageId, locs
+                ));
+            }
         }
     }
 
@@ -136,15 +128,14 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             dataNodes = Collections.unmodifiableList(snapshot);
         }
 
-        // §4.9.4: File 模式下，首次从 Registry 拿到 DataNode 列表后，
-        // 利用 host:port -> node_id 映射在线回填 namenode_meta.log
+        // §4.9.4: 首次从 Registry 拿到 DataNode 列表后，利用 host:port -> node_id 映射在线回填。
         if (metadataManager != null && nodes != null && !nodes.isEmpty()
                 && nodeIdBackfillDone.compareAndSet(false, true)) {
-            if (metadataManager instanceof MySQLMetadataManager) {
-                // MySQL 模式: §4.9.2 在线补全 file_location.dentanode_id
-                ((MySQLMetadataManager) metadataManager).backfillDataNodeIds();
+            if (metadataManager.isJdbcBacked()) {
+                // JDBC 模式 (mysql/h2): §4.9.2 在线补全 file_location.datanode_id
+                metadataManager.backfillDataNodeIds();
             } else {
-                // File 模式: §4.9.4 在线回填 namenode_meta.log 中的 host:port
+                // File 模式 (已退役): §4.9.4 在线回填 namenode_meta.log 中的 host:port
                 metadataManager.backfillNodeIds();
             }
         }
@@ -615,8 +606,8 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         String fileHash = parts[0];
         String nodeId = parts[1];
 
-        // file 模式不处理（理论上不会收到，但安全起见）
-        if (!(metadataManager instanceof MySQLMetadataManager)) {
+        // 非 JDBC 模式不处理（file 模式已退役，理论上不会收到；H2 单副本也不会收到）
+        if (!metadataManager.isJdbcBacked()) {
             NettyHandlerHelper.sendError(ctx, "file 模式不支持副本提交");
             return;
         }
@@ -653,12 +644,11 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
      * 重复执行仅更新 status=1（已 ACTIVE 的行无副作用）。
      */
     private void insertReplicaLocation(String fileHash, String nodeId) throws Exception {
-        // 必须是 MySQL 模式（调用方已检查）
-        MySQLMetadataManager mysqlMgr = (MySQLMetadataManager) metadataManager;
-        javax.sql.DataSource ds = mysqlMgr.getDataSource();
+        // 必须是 JDBC 模式（调用方已检查）；DataSource 在父类可取，无需向下转型
+        javax.sql.DataSource ds = metadataManager.getDataSource();
 
         String sql = "INSERT INTO file_location (file_hash, datanode_id, status, replica_role, create_time)" +
-                " VALUES (?, ?, 1, 1, NOW())" +
+                " VALUES (?, ?, 1, 1, CURRENT_TIMESTAMP)" +
                 " ON DUPLICATE KEY UPDATE status = 1, replica_role = 1";
         try (java.sql.Connection conn = ds.getConnection();
              java.sql.PreparedStatement stmt = conn.prepareStatement(sql)) {

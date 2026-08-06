@@ -31,7 +31,7 @@ public final class MigrationRunner {
     private static final Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
 
     /** 当前目标版本（代码所期望的最新 schema 版本） */
-    public static final int CURRENT_VERSION = 4;
+    public static final int CURRENT_VERSION = 5;
 
     /** file 模式版本文件名 */
     public static final String META_VERSION_FILE = "meta_version";
@@ -40,10 +40,17 @@ public final class MigrationRunner {
     /** file 模式元数据日志文件名 */
     public static final String METADATA_LOG_FILE = "namenode_meta.log";
 
-    /** mysql 模式版本表名 */
+    /** JDBC 模式（mysql / h2）版本表名 */
     public static final String SCHEMA_VERSION_TABLE = "schema_version";
-    /** mysql 模式锚点业务表（所有版本都存在的表） */
+    /** JDBC 模式锚点业务表（所有版本都存在的表） */
     public static final String ANCHOR_TABLE = "file_metadata";
+
+    /**
+     * H2 嵌入式文件库的数据库文件名（仅命名常量）。
+     * <p>实际路径解析由 NameNode 侧用 {@link org.jnfs.common.DataDirResolver}
+     * 完成（{@code jdbc:h2:file:<dataDir>/jnfs}），本类不强依赖此常量。
+     */
+    public static final String H2_DB_FILE = "jnfs.mv.db";
 
     /** 迁移步骤配置文件目录 */
     private static final String MIGRATIONS_DIR = "META-INF/migrations/";
@@ -55,8 +62,9 @@ public final class MigrationRunner {
      * 执行迁移
      *
      * @param mode       存储模式
-     * @param dataDir    file 模式下的数据目录（mysql 模式可为 null）
-     * @param dataSource mysql 模式下的数据源（file 模式可为 null）
+     * @param dataDir    file 模式下的数据目录（mysql / h2 模式可为 null）
+     * @param dataSource mysql / h2 模式下的数据源（file 模式可为 null；H2 嵌入式库
+     *                   复用同一 dataSource 槽位，与 mysql 同构）
      * @return 迁移结果
      */
     public static MigrationResult run(StorageMode mode, File dataDir, DataSource dataSource) {
@@ -142,38 +150,65 @@ public final class MigrationRunner {
      * <p>
      * - 已纳入管理：schema_version 存在 → 读取版本号
      * - 老数据：schema_version 不存在 + 业务表/日志存在 → 版本 0
-     * - 全新部署：schema_version 不存在 + 业务表/日志也不存在 → CURRENT_VERSION
+     * - 全新部署：schema_version 不存在 + 业务表/日志也不存在 → CURRENT_VERSION（mysql）/ 0（h2）
      */
     static int detectVersion(MigrationContext ctx) throws Exception {
-        if (ctx.mode() == StorageMode.MYSQL) {
-            return detectMysqlVersion(ctx);
-        } else {
-            return detectFileVersion(ctx);
+        switch (ctx.mode()) {
+            case MYSQL:
+                return detectJdbcVersion(ctx, JdbcDialect.MysqlDialect.INSTANCE, true);
+            case H2:
+                return detectH2Version(ctx);
+            default:
+                return detectFileVersion(ctx);
         }
     }
 
-    private static int detectMysqlVersion(MigrationContext ctx) throws SQLException {
+    /**
+     * JDBC 模式（mysql / h2）通用版本检测
+     *
+     * @param ctx               迁移上下文
+     * @param dialect           方言
+     * @param freshDeployHint   全新部署时是否直接写 CURRENT_VERSION（mysql 保留旧行为捷径；
+     *                          h2 必须为 false：首启必走全链建表）
+     */
+    private static int detectJdbcVersion(MigrationContext ctx, JdbcDialect dialect,
+                                         boolean freshDeployHint) throws SQLException {
         DataSource ds = ctx.dataSource();
         if (ds == null) {
-            throw new IllegalStateException("MySQL mode requires a DataSource");
+            throw new IllegalStateException(ctx.mode() + " mode requires a DataSource");
         }
 
         try (Connection conn = ds.getConnection()) {
-            if (tableExists(conn, SCHEMA_VERSION_TABLE)) {
-                return readMysqlVersion(conn);
+            if (dialect.tableExists(conn, SCHEMA_VERSION_TABLE)) {
+                return readJdbcVersion(conn);
             }
 
             // schema_version 不存在，区分老数据 vs 全新部署
-            if (tableExists(conn, ANCHOR_TABLE)) {
+            if (dialect.tableExists(conn, ANCHOR_TABLE)) {
                 LOG.info("schema_version 不存在但 {} 存在，判定为老数据（版本 0）", ANCHOR_TABLE);
                 return 0;
             }
 
             LOG.info("schema_version 和 {} 均不存在，判定为全新部署", ANCHOR_TABLE);
-            // 全新部署：建表 + 写入当前版本号
-            initializeMysqlSchema(conn);
-            return CURRENT_VERSION;
+            if (freshDeployHint) {
+                // mysql：全新部署建表 + 写入当前版本号（旧行为捷径）
+                initializeJdbcSchema(conn);
+                return CURRENT_VERSION;
+            }
+            // h2：不做捷径，返回 0，让迁移链全量建表
+            LOG.info("H2 全新部署不写版本号捷径，返回版本 0，由迁移链全量建表");
+            return 0;
         }
+    }
+
+    /**
+     * H2 嵌入式文件库版本检测
+     * <p>
+     * 与 mysql 不同：H2 全新部署不做"直接写 CURRENT_VERSION"捷径，确保首启必走全链建表。
+     * schema_version 表不存在一律返回 0。
+     */
+    private static int detectH2Version(MigrationContext ctx) throws SQLException {
+        return detectJdbcVersion(ctx, JdbcDialect.H2Dialect.INSTANCE, false);
     }
 
     private static int detectFileVersion(MigrationContext ctx) throws IOException {
@@ -200,20 +235,18 @@ public final class MigrationRunner {
         return CURRENT_VERSION;
     }
 
-    // ==================== MySQL 版本操作 ====================
+    // ==================== JDBC 通用版本操作 ====================
 
-    private static boolean tableExists(Connection conn, String tableName) throws SQLException {
-        String sql = "SELECT COUNT(*) FROM information_schema.tables "
-                + "WHERE table_schema = DATABASE() AND table_name = ?";
-        try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.setString(1, tableName);
-            try (ResultSet rs = stmt.executeQuery()) {
-                return rs.next() && rs.getInt(1) > 0;
-            }
-        }
+    /**
+     * 旧的 tableExists——已被 {@link JdbcDialect#tableExists} 替代，
+     * 保留以保持与外部调用者的兼容（如后续删掉可标记 deprecated）
+     */
+    @Deprecated
+    static boolean tableExists(Connection conn, String tableName) throws SQLException {
+        return JdbcDialect.MysqlDialect.INSTANCE.tableExists(conn, tableName);
     }
 
-    private static int readMysqlVersion(Connection conn) throws SQLException {
+    private static int readJdbcVersion(Connection conn) throws SQLException {
         String sql = "SELECT version FROM " + SCHEMA_VERSION_TABLE + " ORDER BY version DESC LIMIT 1";
         try (PreparedStatement stmt = conn.prepareStatement(sql);
              ResultSet rs = stmt.executeQuery()) {
@@ -226,10 +259,13 @@ public final class MigrationRunner {
     }
 
     /**
-     * 全新部署时初始化 MySQL schema
-     * 创建 schema_version 表并写入当前版本号
+     * 全新部署时初始化 JDBC schema（mysql 专用捷径）
+     * <p>
+     * 创建 schema_version 表并写入当前版本号。
+     * 注意：H2 不走此捷径（detectH2Version freshDeployHint=false），
+     * 本方法仅 mysql 全新部署时调用。
      */
-    private static void initializeMysqlSchema(Connection conn) throws SQLException {
+    private static void initializeJdbcSchema(Connection conn) throws SQLException {
         conn.createStatement().executeUpdate(
                 "CREATE TABLE IF NOT EXISTS `" + SCHEMA_VERSION_TABLE + "` ("
                         + "`version` INT NOT NULL COMMENT '当前 schema 版本', "
@@ -241,6 +277,24 @@ public final class MigrationRunner {
                 "INSERT INTO " + SCHEMA_VERSION_TABLE + " (version) VALUES (" + CURRENT_VERSION + ")"
         );
         LOG.info("全新部署：已创建 schema_version 表并写入版本号 {}", CURRENT_VERSION);
+    }
+
+    // ==================== 旧 mysql 方法（保留兼容，内部委托到通用方法）====================
+
+    /**
+     * @deprecated 使用 {@link #readJdbcVersion}，保留供外部兼容调用
+     */
+    @Deprecated
+    static int readMysqlVersion(Connection conn) throws SQLException {
+        return readJdbcVersion(conn);
+    }
+
+    /**
+     * @deprecated 使用 {@link #initializeJdbcSchema}，保留供外部兼容调用
+     */
+    @Deprecated
+    static void initializeMysqlSchema(Connection conn) throws SQLException {
+        initializeJdbcSchema(conn);
     }
 
     // ==================== File 版本操作 ====================
@@ -291,23 +345,28 @@ public final class MigrationRunner {
     // ==================== 版本号写入（迁移步骤成功后调用） ====================
 
     private static void writeVersion(MigrationContext ctx, int version) throws Exception {
-        if (ctx.mode() == StorageMode.MYSQL) {
-            writeMysqlVersion(ctx, version);
+        StorageMode mode = ctx.mode();
+        if (mode == StorageMode.MYSQL || mode == StorageMode.H2) {
+            writeJdbcVersion(ctx, version);
         } else {
             writeFileVersionAtomic(ctx.dataDir(), version);
         }
     }
 
     /**
-     * MySQL 模式写入版本号
+     * JDBC 模式（mysql / h2）写入版本号
+     * <p>
      * 注意：此方法在迁移步骤的事务外调用，用于非事务性迁移步骤的版本号更新。
      * 如果迁移步骤本身在事务内更新了 schema_version，则此方法会执行 UPDATE（幂等）。
+     * <p>
+     * 表是否存在的检测走 {@link JdbcDialect#tableExists}，兼容 mysql 与 h2。
      */
-    private static void writeMysqlVersion(MigrationContext ctx, int version) throws SQLException {
+    private static void writeJdbcVersion(MigrationContext ctx, int version) throws SQLException {
         DataSource ds = ctx.dataSource();
+        JdbcDialect dialect = JdbcDialect.dialectFor(ctx.mode());
         try (Connection conn = ds.getConnection()) {
             // 确保 schema_version 表存在
-            if (!tableExists(conn, SCHEMA_VERSION_TABLE)) {
+            if (!dialect.tableExists(conn, SCHEMA_VERSION_TABLE)) {
                 conn.createStatement().executeUpdate(
                         "CREATE TABLE IF NOT EXISTS `" + SCHEMA_VERSION_TABLE + "` ("
                                 + "`version` INT NOT NULL COMMENT '当前 schema 版本', "
@@ -331,6 +390,14 @@ public final class MigrationRunner {
                 }
             }
         }
+    }
+
+    /**
+     * @deprecated 使用 {@link #writeJdbcVersion}，保留供外部兼容调用
+     */
+    @Deprecated
+    static void writeMysqlVersion(MigrationContext ctx, int version) throws SQLException {
+        writeJdbcVersion(ctx, version);
     }
 
     // ==================== 步骤加载 ====================

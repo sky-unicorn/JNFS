@@ -35,9 +35,11 @@ public class RegistryServer {
     /**
      * 共享存储 DataSource（storage.mode=mysql 时创建）。
      * 同时供 Dashboard 鉴权用户库（dashboard_user 表）与冗余存储管理 API 使用，两者同库。
-     * file 模式为 null。
+     * file/h2 模式为 null。
      */
     private final com.zaxxer.hikari.HikariDataSource metadataDataSource;
+    /** 顶层 storage.mode（file | h2 | mysql），传给 Dashboard 用于监控页展示与空态文案 */
+    private final String storageMode;
 
     // 运行标志
     private final AtomicBoolean running = new AtomicBoolean(true);
@@ -45,24 +47,30 @@ public class RegistryServer {
     private DashboardServer dashboardServer;
 
     public RegistryServer(int port, int dashboardPort) {
-        this(port, dashboardPort, null, null);
+        this(port, dashboardPort, null, null, null);
     }
 
     public RegistryServer(int port, int dashboardPort, AuthManager authManager) {
-        this(port, dashboardPort, authManager, null);
+        this(port, dashboardPort, authManager, null, null);
     }
 
     public RegistryServer(int port, int dashboardPort, AuthManager authManager,
                           com.zaxxer.hikari.HikariDataSource metadataDataSource) {
+        this(port, dashboardPort, authManager, metadataDataSource, null);
+    }
+
+    public RegistryServer(int port, int dashboardPort, AuthManager authManager,
+                          com.zaxxer.hikari.HikariDataSource metadataDataSource, String storageMode) {
         this.port = port;
         this.dashboardPort = dashboardPort;
         this.authManager = authManager;
         this.metadataDataSource = metadataDataSource;
+        this.storageMode = storageMode;
     }
 
     public void run() throws Exception {
-        // 启动 Dashboard（传入元数据库 DataSource 供冗余存储 API 使用）
-        dashboardServer = new DashboardServer(dashboardPort, authManager, metadataDataSource);
+        // 启动 Dashboard（传入元数据库 DataSource 供冗余存储 API 使用；storageMode 供展示/空态文案）
+        dashboardServer = new DashboardServer(dashboardPort, authManager, metadataDataSource, storageMode);
         new Thread(() -> dashboardServer.start()).start();
 
         // 注册 Shutdown Hook
@@ -152,7 +160,7 @@ public class RegistryServer {
         }
 
         // mysql 模式：创建单一共享 DataSource（dashboard_user 表与冗余元数据表同库）
-        // file 模式：不创建 DataSource（FileUserStore + 无冗余 API）
+        // file/h2 模式：不创建 DataSource（FileUserStore + 无冗余 API）
         com.zaxxer.hikari.HikariDataSource storageDataSource =
                 "mysql".equalsIgnoreCase(storageMode) ? createMysqlDataSource(storageConfig) : null;
 
@@ -164,15 +172,21 @@ public class RegistryServer {
                 authManager != null ? ", 鉴权: 已启用" : ", 鉴权: 已禁用",
                 storageDataSource != null ? ", 冗余API: 已启用" : ", 冗余API: 未启用");
 
-        new RegistryServer(port, dashboardPort, authManager, storageDataSource).run();
+        new RegistryServer(port, dashboardPort, authManager, storageDataSource, storageMode).run();
     }
 
     /**
      * 将顶层 storage 配置序列化为管道分隔明文（供 NameNode 拉取）。
      * <p>
-     * 格式：{@code mode|mysqlHost|mysqlPort|mysqlDatabase|mysqlUser|mysqlPassword}
-     * - file 模式：{@code file|||||}（后 5 字段空）
-     * - mysql 模式：{@code mysql|host|port|database|user|password}
+     * 统一 7 字段格式：{@code mode|mysqlHost|mysqlPort|mysqlDatabase|mysqlUser|mysqlPassword|h2Path}
+     * <ul>
+     *   <li>mysql 模式：{@code mysql|host|port|database|user|password|}（第 7 位 h2Path 为空）</li>
+     *   <li>h2 模式：{@code h2||||||<h2Path 或空>}（2-6 位为空；第 7 位为配置的 h2 路径，空表示
+     *       NameNode 侧用 DataDirResolver 默认解析）</li>
+     *   <li>file（已退役）/其它：{@code file||||||}（7 字段全空，按 file-like 处理）</li>
+     * </ul>
+     * 向后兼容：旧 payload 为 6 字段（无 h2Path），新序列化统一输出 7 字段；NameNode 侧 StorageConfig.parse
+     * 需兼容 6/7 两种长度（第 7 位缺失视为空 h2Path）。
      * <p>
      * 本方法只产出明文，由调用方负责 AES 加密后再发布；不输出密码日志。
      *
@@ -182,17 +196,33 @@ public class RegistryServer {
     @SuppressWarnings("unchecked")
     private static String serializeStorageConfig(Map<String, Object> storageConfig) {
         String mode = (String) storageConfig.getOrDefault("mode", "file");
-        if (!"mysql".equalsIgnoreCase(mode)) {
-            return "file|||||"; // file 模式：5 个空字段
+        if ("mysql".equalsIgnoreCase(mode)) {
+            Map<String, Object> mysql = (Map<String, Object>) storageConfig.getOrDefault("mysql", Map.of());
+            return String.join("|",
+                    "mysql",
+                    esc((String) mysql.getOrDefault("host", "localhost")),
+                    esc(String.valueOf(mysql.getOrDefault("port", 3306))),
+                    esc((String) mysql.getOrDefault("database", "jnfs")),
+                    esc((String) mysql.getOrDefault("user", "root")),
+                    esc((String) mysql.getOrDefault("password", "")),
+                    ""); // 第 7 位 h2Path：mysql 模式为空
         }
-        Map<String, Object> mysql = (Map<String, Object>) storageConfig.getOrDefault("mysql", Map.of());
-        return String.join("|",
-                "mysql",
-                (String) mysql.getOrDefault("host", "localhost"),
-                String.valueOf(mysql.getOrDefault("port", 3306)),
-                (String) mysql.getOrDefault("database", "jnfs"),
-                (String) mysql.getOrDefault("user", "root"),
-                (String) mysql.getOrDefault("password", ""));
+        if ("h2".equalsIgnoreCase(mode)) {
+            Map<String, Object> h2 = (Map<String, Object>) storageConfig.getOrDefault("h2", Map.of());
+            String h2Path = (String) h2.getOrDefault("path", "");
+            // 2-6 位为空，第 7 位为 h2 路径（可空，空表示 NameNode 用 DataDirResolver 默认解析）
+            return String.join("|", "h2", "", "", "", "", "", esc(h2Path == null ? "" : h2Path));
+        }
+        // file（已退役）或其它：按 file-like 处理，7 字段全空
+        return "file||||||";
+    }
+
+    /**
+     * 字段转义：payload 用 {@code |} 分隔，字段值内的 {@code |} 会破坏 7 字段契约。
+     * 用 {@code \\|} 转义（NameNode 侧 {@code StorageConfig.parse} 反转义）。
+     */
+    private static String esc(String v) {
+        return v == null ? "" : v.replace("|", "\\|");
     }
 
     /**
@@ -231,7 +261,7 @@ public class RegistryServer {
      * <p>
      * 用户存储后端由顶层 storage.mode 决定：
      * - mysql：复用共享 DataSource（MysqlUserStore，close() 不关闭共享池）
-     * - file：本地文件（FileUserStore）
+     * - file/h2：本地文件（FileUserStore，h2 与 file 一致按 file-like 处理）
      * <p>
      * 配置路径：dashboard.auth.*
      * - enabled: 是否启用（默认 false，保留旧的无登录行为）
@@ -239,7 +269,7 @@ public class RegistryServer {
      * - session.timeout-seconds: session 有效期（默认 7200）
      *
      * @param dashboardConfig  dashboard 配置段
-     * @param storageMode      顶层 storage.mode（file | mysql）
+     * @param storageMode      顶层 storage.mode（file | h2 | mysql）
      * @param sharedDataSource 共享 DataSource（mysql 模式时非 null）
      * @return AuthManager 实例，未启用鉴权时返回 null
      */

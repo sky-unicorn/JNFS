@@ -11,7 +11,7 @@
  Target Server Version : 80020
  File Encoding         : 65001
 
- Date: 05/08/2026 (V4 schema — 节点排空 node_drain 表)
+ Date: 05/08/2026 (V5 schema — H2 嵌入式文件库复用同一 schema，无 DDL 变更)
 */
 
 SET NAMES utf8mb4;
@@ -28,9 +28,9 @@ CREATE TABLE `schema_version` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='schema 版本记录';
 
 -- ----------------------------
--- Records of schema_version (V4)
+-- Records of schema_version (V5)
 -- ----------------------------
-INSERT INTO `schema_version` VALUES (4, NOW());
+INSERT INTO `schema_version` VALUES (5, NOW());
 
 -- ----------------------------
 -- Table structure for node_registry

@@ -36,7 +36,7 @@ public class MysqlV3ToV4 implements MigrationStep {
 
     @Override
     public boolean supports(StorageMode mode) {
-        return mode == StorageMode.MYSQL;
+        return mode == StorageMode.MYSQL || mode == StorageMode.H2;
     }
 
     @Override
@@ -48,7 +48,7 @@ public class MysqlV3ToV4 implements MigrationStep {
     public String migrate(MigrationContext ctx) throws Exception {
         DataSource ds = ctx.dataSource();
         if (ds == null) {
-            return "MySQL mode requires a DataSource";
+            return ctx.mode() + " mode requires a DataSource";
         }
 
         try (Connection conn = ds.getConnection()) {
@@ -57,7 +57,7 @@ public class MysqlV3ToV4 implements MigrationStep {
             return null;
         } catch (SQLException e) {
             LOG.error("MysqlV3ToV4: 迁移失败", e);
-            return "MySQL migration V3→V4 failed: " + e.getMessage();
+            return ctx.mode() + " migration V3→V4 failed: " + e.getMessage();
         }
     }
 

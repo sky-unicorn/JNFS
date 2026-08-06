@@ -33,21 +33,29 @@ public class DashboardServer {
     private final AuthManager authManager;
     /** 元数据库 DataSource（决策 9：Registry 连元数据库读写冗余组/策略/任务表） */
     private final javax.sql.DataSource metadataDataSource;
+    /** 顶层 storage.mode（file | h2 | mysql），用于监控页展示与空态文案；null 视为 file-like */
+    private final String storageMode;
 
     private HttpServer server;
 
     public DashboardServer(int port) {
-        this(port, null, null);
+        this(port, null, null, null);
     }
 
     public DashboardServer(int port, AuthManager authManager) {
-        this(port, authManager, null);
+        this(port, authManager, null, null);
     }
 
     public DashboardServer(int port, AuthManager authManager, javax.sql.DataSource metadataDataSource) {
+        this(port, authManager, metadataDataSource, null);
+    }
+
+    public DashboardServer(int port, AuthManager authManager, javax.sql.DataSource metadataDataSource,
+                           String storageMode) {
         this.port = port;
         this.authManager = authManager;
         this.metadataDataSource = metadataDataSource;
+        this.storageMode = storageMode;
     }
 
     public void start() {
@@ -97,11 +105,15 @@ public class DashboardServer {
                 addProtected("/api/replication/alerts", replicationHandler, authFilter);
                 LOG.info("Dashboard: 冗余存储管理 API 已注册（12 端点）");
             } else {
-                // S6: file 模式下冗余存储 API 统一返回 JSON 503，而非落到 "/" 返回 HTML
+                // S6: file/h2 模式下冗余存储 API 统一返回 JSON 503，而非落到 "/" 返回 HTML
                 // （前端 fetch 期望 JSON，HTML 会让 res.json() 抛错且无法区分"未配置"）
+                // h2 为嵌入式单机模式，与 file 一样无冗余，文案区分便于运维识别
+                String disabledReason = "h2".equalsIgnoreCase(storageMode)
+                        ? "metadata API disabled in h2 mode (embedded single-node, no redundancy)"
+                        : "metadata API disabled in file mode";
                 HttpHandler disabled = exchange -> {
                     org.jnfs.registry.api.JsonHttpUtils.sendError(
-                            exchange, 503, "metadata API disabled in file mode");
+                            exchange, 503, disabledReason);
                 };
                 addProtected("/api/replication/groups", disabled, authFilter);
                 addProtected("/api/replication/groups/", disabled, authFilter);
@@ -110,7 +122,8 @@ public class DashboardServer {
                 addProtected("/api/replication/sync", disabled, authFilter);
                 addProtected("/api/replication/sync/", disabled, authFilter);
                 addProtected("/api/replication/alerts", disabled, authFilter);
-                LOG.info("Dashboard: 元数据库 DataSource 未配置，冗余存储 API 返回 503（file 模式）");
+                LOG.info("Dashboard: 元数据库 DataSource 未配置，冗余存储 API 返回 503（{} 模式）",
+                        "h2".equalsIgnoreCase(storageMode) ? "h2" : "file");
             }
 
             server.setExecutor(null);
@@ -222,6 +235,19 @@ public class DashboardServer {
         private String buildHtml() {
             // 鉴权是否启用（由外部类 authManager 决定）
             boolean authEnabled = authManager != null;
+            // 规范化存储模式用于展示/JS 注入（白名单，无注入风险）
+            String modeForJs;
+            if (storageMode == null) {
+                modeForJs = "file";
+            } else if ("mysql".equalsIgnoreCase(storageMode)) {
+                modeForJs = "mysql";
+            } else if ("h2".equalsIgnoreCase(storageMode)) {
+                modeForJs = "h2";
+            } else {
+                modeForJs = "file";
+            }
+            // 是否为单机无冗余模式（file/h2）：冗余管理 Tab 显示友好提示
+            boolean noRedundancy = !"mysql".equals(modeForJs);
             // 使用 Java 文本块（Java 17）内联 HTML/CSS/JS，避免 \" / \n 转义地狱。
             // 文本块内只需转义字面的 \"\"\"（本页无）；JS/CSS 引号原样书写。
             String html = """
@@ -547,6 +573,10 @@ public class DashboardServer {
                     <h3>安全状态</h3>
                     <div class="value" id="securityStatus"><span style="color:#e67e22">加载中...</span></div>
                 </div>
+                <div class="card">
+                    <h3>存储模式</h3>
+                    <div class="value" id="storageModeText" style="font-size:1.4rem;">__STORAGE_MODE_UPPER__</div>
+                </div>
             </div>
             <div class="table-container">
                 <table id="nodeTable">
@@ -570,6 +600,13 @@ public class DashboardServer {
 
         <!-- ========== 冗余存储管理 Tab（§16.3-16.6） ========== -->
         <div class="tab-content" id="tab-redundancy" data-tab-group="top">
+""" + (noRedundancy ? """
+            <!-- 单机嵌入式（file/h2）模式：无冗余，提示运维 -->
+            <div class="card" style="margin-bottom:1rem;background:var(--info-bg);color:var(--info-color);">
+                <span style="font-weight:600;">单机嵌入式·无冗余</span>
+                <span style="margin-left:0.5rem;">当前 __STORAGE_MODE_UPPER__ 模式为单副本存储，冗余存储管理不可用（冗余 API 返回 503）。</span>
+            </div>
+""" : "") + """
             <div class="sub-tab-nav" data-tab-group="redundancy">
                 <button class="tab active" data-tab="tab-groups" onclick="switchSubTab('tab-groups')">冗余组管理</button>
                 <button class="tab" data-tab="tab-sync" onclick="switchSubTab('tab-sync')">对账同步</button>
@@ -748,6 +785,9 @@ public class DashboardServer {
 
     <script>
     /* ===================== 全局状态 ===================== */
+    // 是否为单机无冗余模式（file/h2）：由服务端注入，用于冗余管理 Tab 的友好空态
+    var NO_REDUNDANCY = __NO_REDUNDANCY__;
+    var STORAGE_MODE = '__STORAGE_MODE__';
     var allNodes = [];          // 缓存 /api/nodes 最新结果
     var allGroups = [];         // 缓存 /api/replication/groups 最新结果
     var policyLoaded = false;   // 同步策略仅加载一次
@@ -1093,8 +1133,12 @@ public class DashboardServer {
             });
             tbody.innerHTML = html;
         }).catch(function(err) {
-            document.querySelector('#groupTable tbody').innerHTML =
-                '<tr><td colspan="4" class="empty-row" style="color:red">' + escapeHtml(err.message) + '</td></tr>';
+            var tbody = document.querySelector('#groupTable tbody');
+            if (NO_REDUNDANCY) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty-row">单机嵌入式·无冗余（' + escapeHtml(STORAGE_MODE.toUpperCase()) + ' 模式，冗余管理不可用）</td></tr>';
+            } else {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty-row" style="color:red">' + escapeHtml(err.message) + '</td></tr>';
+            }
         });
     }
 
@@ -1281,8 +1325,12 @@ public class DashboardServer {
             }
         }).catch(function(err) {
             document.getElementById('syncPending').innerText = '-';
-            document.querySelector('#failedJobsTable tbody').innerHTML =
-                '<tr><td colspan="6" class="empty-row" style="color:red">' + escapeHtml(err.message) + '</td></tr>';
+            var fj = document.querySelector('#failedJobsTable tbody');
+            if (NO_REDUNDANCY) {
+                fj.innerHTML = '<tr><td colspan="6" class="empty-row">单机嵌入式·无冗余（' + escapeHtml(STORAGE_MODE.toUpperCase()) + ' 模式，对账同步不可用）</td></tr>';
+            } else {
+                fj.innerHTML = '<tr><td colspan="6" class="empty-row" style="color:red">' + escapeHtml(err.message) + '</td></tr>';
+            }
         });
     }
     function triggerSync() {
@@ -1349,7 +1397,7 @@ public class DashboardServer {
             document.getElementById('maxConcurrency').value = (p.maxConcurrency !== undefined ? p.maxConcurrency : 4);
             policyLoaded = true;
         }).catch(function(err) {
-            showToast('加载策略失败: ' + err.message, 'error');
+            if (!NO_REDUNDANCY) showToast('加载策略失败: ' + err.message, 'error');
         });
     }
     function savePolicy() {
@@ -1396,8 +1444,12 @@ public class DashboardServer {
             }
         }).catch(function(err) {
             document.getElementById('alertActiveCount').innerText = '-';
-            document.querySelector('#alertTable tbody').innerHTML =
-                '<tr><td colspan="5" class="empty-row" style="color:red">' + escapeHtml(err.message) + '</td></tr>';
+            var at = document.querySelector('#alertTable tbody');
+            if (NO_REDUNDANCY) {
+                at.innerHTML = '<tr><td colspan="5" class="empty-row">单机嵌入式·无冗余（' + escapeHtml(STORAGE_MODE.toUpperCase()) + ' 模式，告警不可用）</td></tr>';
+            } else {
+                at.innerHTML = '<tr><td colspan="5" class="empty-row" style="color:red">' + escapeHtml(err.message) + '</td></tr>';
+            }
             updateAlertDot(0);
         });
     }
@@ -1510,6 +1562,10 @@ public class DashboardServer {
 </body>
 </html>
 """;
+            // 注入存储模式占位符（占位符均为白名单值，无 XSS 风险）
+            html = html.replace("__NO_REDUNDANCY__", String.valueOf(noRedundancy))
+                       .replace("__STORAGE_MODE__", modeForJs)
+                       .replace("__STORAGE_MODE_UPPER__", modeForJs.toUpperCase());
             return html;
         }
     }
