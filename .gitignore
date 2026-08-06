@@ -35,7 +35,7 @@ file_to_mysql_imported
 # Claude Code 本地配置（保留 rules 进仓库供 CLAUDE.md 引用）
 .claude/*
 CLAUDE.md
-docs/design/upgrade-migration-architecture.md
 dashboard_users.properties
 dist-test/**
 docs/design/**
+jnfs.**.db

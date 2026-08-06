@@ -1,69 +1,67 @@
-# --- 注册中心服务配置 ---
+# Registry 注册中心配置
+# 负责 DataNode/NameNode 的注册、心跳维护，以及向 NameNode 推送存储配置。
+# 所有节点部署多份 Registry 时，security 段必须保持完全一致。
+
+# --- RPC 服务 ---
 server:
-  # RPC 服务监听端口 (默认: 5367)
   port: 5367
 
 # --- 统一存储配置 ---
 # mode 同时决定两件事，避免存储模式与数据库连接信息在多处重复耦合：
-#   - Dashboard 鉴权用户存储后端：h2=本地文件(FileUserStore)，mysql=dashboard_user 表
+#   - Dashboard 鉴权用户存储后端：h2=本地文件（FileUserStore），mysql=dashboard_user 表
 #   - 冗余存储管理 API 是否启用：h2=单机无冗余，mysql=连元数据库读写冗余组/策略/任务表
-# 运行时支持两种模式：h2 / mysql（遵循 storage-compatibility 双模式约束）。
 storage:
   # 存储模式：h2 | mysql
-  # h2    = 嵌入式 H2 文件库（单机零依赖开箱即用，NameNode 进程独享 H2 文件，
-  #         Registry 不连 H2）；鉴权走 FileUserStore，冗余 API 返回 503，单副本
-  # mysql = 连接 MySQL（dashboard_user 表与冗余元数据表同库，冗余 API 可用，多副本）
-  # 注：旧版本的 file 模式已退役；老部署若仍配 mode: file，启动时自动映射为 h2
-  #     并把历史 namenode_meta.log 数据迁移进 H2（无需改配置即可平滑升级）
-  mode: mysql
+  # h2    = 嵌入式 H2 文件库（单机零依赖，鉴权走本地文件，无冗余 API）
+  # mysql = 连接 MySQL（鉴权与冗余 API 共享 DataSource，需配置下方 mysql 段）
+  # 注：旧版本 file 模式已退役；若仍配 mode: file，启动时自动映射为 h2
+  mode: h2
 
-  # MySQL 连接配置（仅当 mode: mysql 时生效）
-  # dashboard 鉴权用户表与冗余组/策略/任务表共用此连接与同一数据库
+  # MySQL 连接（仅 mode: mysql 时生效）
+  # dashboard_user 表与冗余元数据表（group/strategy/task）共用此连接与同一数据库
   mysql:
     host: 100.10.11.204
     port: 3306
-    database: jnfs                # dashboard_user 表与冗余元数据表同库
+    database: jnfs
     user: jnfs
-    password: jnfs@123                  # 建议通过外部 conf/registry.yml 配置，勿提交明文
+    # 生产环境建议将 password 留空，通过环境变量 JNFS_REGISTRY_MYSQL_PASSWORD 提供
+    password: jnfs@123
 
-  # H2 连接配置（仅当 mode: h2 时生效）
-  # Registry 不连 H2（NameNode 进程独享），此 path 仅用于序列化进 storage payload，
+  # H2 文件库路径（仅 mode: h2 时生效）
+  # Registry 自身不连 H2（由 NameNode 进程独享），此处 path 仅序列化进 storage payload，
   # 由 NameNode 拉取后定位 H2 文件。留空表示 NameNode 用 DataDirResolver 默认解析。
   h2:
     path: ""
 
-# --- 监控 Dashboard 配置 ---
+# --- Dashboard Web 监控 ---
 dashboard:
-  # Web 监控页面端口 (默认: 15367)
-  # 访问地址: http://localhost:15367
+  # Web 监控页面端口（http://localhost:15367）
   port: 15367
 
-  # --- 登录鉴权配置 ---
+  # 登录鉴权
   auth:
-    # 是否启用登录鉴权（false 则跳过所有鉴权，保留旧的无登录行为）
+    # 是否启用登录鉴权；false 则跳过所有鉴权，保留旧的无登录行为
     enabled: true
 
-    # 用户存储后端由顶层 storage.mode 决定（不再在此处重复配置 mode 与数据库连接）
-    #   storage.mode=mysql -> MysqlUserStore（共享 storage.mysql 连接池）
-    #   storage.mode=h2    -> FileUserStore（本地文件）
-
-    # 初始管理员账号（仅在首次启动且存储中无用户时使用，创建后建议清空 password）
-    # 密码也可通过环境变量 JNFS_DASHBOARD_ADMIN_PASSWORD 提供（配置优先）
+    # 首次启动且存储中无用户时使用的初始管理员（创建后建议清空 password）
+    # 密码也可用环境变量 JNFS_DASHBOARD_ADMIN_PASSWORD 提供（配置优先）
     initial-admin:
       username: admin
-      password: admin                # 留空则回退环境变量 JNFS_DASHBOARD_ADMIN_PASSWORD；两者均空则拒绝启动
+      # 留空则回退环境变量；两者均空则拒绝启动
+      password: admin
 
     # Session 超时时间（秒），默认 2 小时
     session:
       timeout-seconds: 7200
 
-# --- 心跳检测配置 ---
+# --- 心跳检测 ---
 heartbeat:
-  # 节点心跳超时时间 (单位: 毫秒)
-  # 超过此时间未收到心跳，将自动剔除 DataNode/NameNode
+  # 节点心跳超时时间（毫秒），超过此时间未收到心跳将自动剔除节点
   timeout_ms: 30000
 
-# --- 安全配置 ---
+# --- 服务间安全配置（与 NameNode/DataNode 必须保持一致）---
 security:
-  # 通信令牌 (服务间鉴权密钥，所有节点必须一致)
+  # 通信 Token
   token: "jnfs-secure-token-2025"
+  # AES 加密密钥（32 字节 = 256 位），NameNode 用此密钥解密 Registry 推送的 storage 配置
+  aes-key: "jnfs-aes-key-256bit-secure-key!!"
