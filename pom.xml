@@ -9,6 +9,7 @@
 
     <modules>
         <module>jnfs-common</module>
+        <module>jnfs-dashboard-ui</module>
         <module>jnfs-registry</module>
         <module>jnfs-namenode</module>
         <module>jnfs-datanode</module>
@@ -52,6 +53,11 @@
             <dependency>
                 <groupId>org.jnfs</groupId>
                 <artifactId>jnfs-driver</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jnfs</groupId>
+                <artifactId>jnfs-dashboard-ui</artifactId>
                 <version>${project.version}</version>
             </dependency>
 

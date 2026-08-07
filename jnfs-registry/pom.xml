@@ -15,6 +15,12 @@
             <groupId>org.jnfs</groupId>
             <artifactId>jnfs-common</artifactId>
         </dependency>
+        <!-- 前端 SPA 产物：jar 内含 classpath:/static/** 资源，经 maven-shade-plugin 合并进 fat-jar 顶部 static/。
+             运行期由 DashboardServer 的 StaticFileHandler 从 classpath 读取，不加载前端依赖 jar 的类。 -->
+        <dependency>
+            <groupId>org.jnfs</groupId>
+            <artifactId>jnfs-dashboard-ui</artifactId>
+        </dependency>
         <!-- Dashboard 登录鉴权：mysql 存储模式所需（版本由父 pom dependencyManagement 管理）。
              hutool（含 cn.hutool.crypto.digest.BCrypt）经 jnfs-common 传递引入，无需在此声明。 -->
         <dependency>

@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.jnfs</groupId>
+        <artifactId>jnfs-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>jnfs-dashboard-ui</artifactId>
+    <packaging>jar</packaging>
+
+    <description>
+        Vue 3 + Ant Design Vue 4 SPA dashboard. 构建期由 frontend-maven-plugin 下载 node 并执行
+        npm install / npm run build，产物 dist/ 经 maven-resources-plugin 复制进 target/classes/static/，
+        最终作为 jar classpath 资源由 jnfs-registry 的 maven-shade-plugin 合并进 fat-jar 顶部 static/。
+        运行期由 DashboardServer 的 StaticFileHandler 从 classpath:/static/ 读取，不单独起前端进程。
+        本模块不含任何 Java 源码；前端应用源码由前端工程师维护（package.json/vite.config.js/src/**）。
+    </description>
+
+    <properties>
+        <!-- node/npm 工具链版本：与设计文档 §4.1 一致，frontend-maven-plugin 会自备下载，不污染宿主环境 -->
+        <node.version>v18.20.4</node.version>
+        <npm.version>10.7.0</npm.version>
+        <!-- vite 产物目录（与 vite.config.js 的 build.outDir 一致） -->
+        <frontend.dist.dir>${project.basedir}/dist</frontend.dist.dir>
+    </properties>
+
+    <build>
+        <plugins>
+            <!--
+              frontend-maven-plugin：下载独立 node/npm 到 target/node，执行 npm install 与 npm run build。
+              三次 execution 均绑定 generate-resources 阶段，按声明顺序执行：
+                install-node-and-npm -> npm-install -> npm-build
+              产物落在 ${project.basedir}/dist（vite build.outDir）。
+              注意：采用 npm install（与设计文档 §4.1 一致），不强制要求提交 package-lock.json，
+              避免仓库无锁文件时 generate-resources 阶段即失败、阻断整条构建管道。
+              若未来需切换回 npm ci 以获得可复现构建，须先由前端工程师 npm install 生成
+              package-lock.json 并入库。
+            -->
+            <plugin>
+                <groupId>com.github.eirslett</groupId>
+                <artifactId>frontend-maven-plugin</artifactId>
+                <version>1.15.0</version>
+                <configuration>
+                    <workingDirectory>${project.basedir}</workingDirectory>
+                    <installDirectory>${project.build.directory}</installDirectory>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>install-node-and-npm</id>
+                        <goals>
+                            <goal>install-node-and-npm</goal>
+                        </goals>
+                        <configuration>
+                            <nodeVersion>${node.version}</nodeVersion>
+                            <npmVersion>${npm.version}</npmVersion>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>npm-install</id>
+                        <goals>
+                            <goal>npm</goal>
+                        </goals>
+                        <phase>generate-resources</phase>
+                        <configuration>
+                            <arguments>install</arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>npm-build</id>
+                        <goals>
+                            <goal>npm</goal>
+                        </goals>
+                        <phase>generate-resources</phase>
+                        <configuration>
+                            <arguments>run build</arguments>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+              把 vite 产物 dist/** 复制进 target/classes/static/**。
+              绑定 process-resources（晚于 generate-resources），确保 npm run build 先产出 dist 再复制。
+              dist/index.html -> classes/static/index.html -> jar:/static/index.html。
+              filtering=false：js/css/字体等二进制资源不做 Maven 占位符替换，避免损坏产物。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <version>3.3.1</version>
+                <executions>
+                    <execution>
+                        <id>copy-static-into-classes</id>
+                        <phase>process-resources</phase>
+                        <goals>
+                            <goal>copy-resources</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.outputDirectory}/static</outputDirectory>
+                            <resources>
+                                <resource>
+                                    <directory>${frontend.dist.dir}</directory>
+                                    <filtering>false</filtering>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
