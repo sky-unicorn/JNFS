@@ -159,10 +159,35 @@ public class RegistryServer {
             System.exit(2);
         }
 
-        // mysql 模式：创建单一共享 DataSource（dashboard_user 表与冗余元数据表同库）
-        // file/h2 模式：不创建 DataSource（FileUserStore + 无冗余 API）
-        com.zaxxer.hikari.HikariDataSource storageDataSource =
-                "mysql".equalsIgnoreCase(storageMode) ? createMysqlDataSource(storageConfig) : null;
+        // mysql 模式：创建单一共享 DataSource（dashboard_user 表、冗余元数据表、node_registry 共用同库）
+        // h2 模式：创建指向同一 H2 文件库的 DataSource（与 NameNode 进程共享，AUTO_SERVER 混合模式），
+        //          用于 node_registry 节点注册持久化 + Dashboard 冗余 API（h2 模式下冗余 API 仍 503，仅节点持久化生效）
+        // file 模式：不创建 DataSource（FileUserStore + 纯内存节点注册，重启即失）
+        com.zaxxer.hikari.HikariDataSource storageDataSource;
+        if ("mysql".equalsIgnoreCase(storageMode)) {
+            storageDataSource = createMysqlDataSource(storageConfig);
+        } else if ("h2".equalsIgnoreCase(storageMode)) {
+            storageDataSource = createH2DataSource(storageConfig);
+        } else {
+            storageDataSource = null;
+        }
+
+        // 注入节点注册持久化 DAO（mysql / h2 模式启用持久化；file 模式退化为纯内存）
+        // 先确保 node_registry 达到 V6 schema（含 free_space 列，幂等；Registry 先于 NameNode
+        // 启动时旧表可能缺列），再从 DB 加载历史节点到内存（离线节点保留显示）
+        if (storageDataSource != null) {
+            try {
+                org.jnfs.registry.api.dao.NodeRegistryDao.ensureSchema(
+                        storageDataSource,
+                        org.jnfs.common.migration.JdbcDialect.dialectFor(
+                                org.jnfs.common.migration.StorageMode.fromConfig(storageMode)));
+            } catch (java.sql.SQLException e) {
+                LOG.error("确保 node_registry 表结构失败，拒绝启动", e);
+                System.exit(2);
+            }
+            RegistryHandler.initNodeRegistryDao(
+                    new org.jnfs.registry.api.dao.NodeRegistryDao(storageDataSource));
+        }
 
         // 初始化 Dashboard 鉴权（mysql 模式复用共享 DataSource）
         AuthManager authManager = initAuth(dashboardConfig, storageMode, storageDataSource);
@@ -254,6 +279,39 @@ public class RegistryServer {
         hikariConfig.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
         LOG.info("共享存储 DataSource 已创建: {}:{}/{}", dbHost, dbPort, dbName);
         return new com.zaxxer.hikari.HikariDataSource(hikariConfig);
+    }
+
+    /**
+     * 创建指向 H2 嵌入式文件库的 DataSource（单机模式，与 NameNode 进程共享同一文件库）。
+     * <p>
+     * 单机打包下 Registry 与 NameNode 是两个独立 JVM 进程，共享同一条 H2 文件库
+     * 必须开启 {@code AUTO_SERVER=TRUE} 混合模式（URL 由 {@link org.jnfs.common.H2DataSourceFactory}
+     * 单一来源构建，与 NameNode 侧逐字节一致，保证多进程协调正常）。
+     * <p>
+     * 文件库路径解析与 NameNode 侧一致：storage.h2.path 非空则用之，空则 DataDirResolver 默认
+     * （APP_HOME）。启动时自建 node_registry 表（进程解耦：registry 先于 namenode 启动时，
+     * 该表可能尚不存在；CREATE TABLE IF NOT EXISTS 幂等，NameNode 迁移链已建则 no-op）。
+     *
+     * @param storageConfig 顶层 storage 配置段
+     * @return HikariDataSource
+     */
+    @SuppressWarnings("unchecked")
+    private static com.zaxxer.hikari.HikariDataSource createH2DataSource(Map<String, Object> storageConfig) {
+        Map<String, Object> h2Config = (Map<String, Object>) storageConfig.getOrDefault("h2", Map.of());
+        String h2Path = (String) h2Config.getOrDefault("path", "");
+        java.io.File h2Dir = (h2Path != null && !h2Path.isEmpty())
+                ? new java.io.File(h2Path)
+                : org.jnfs.common.DataDirResolver.dataDir();
+        if (!h2Dir.exists() && !h2Dir.mkdirs()) {
+            LOG.error("H2 数据目录不存在且无法创建: {}，拒绝启动", h2Dir.getAbsolutePath());
+            System.exit(2);
+        }
+
+        // 建库（AUTO_SERVER 混合模式）；node_registry 表结构由 NodeRegistryDao.ensureSchema 统一保证
+        com.zaxxer.hikari.HikariDataSource ds =
+                org.jnfs.common.H2DataSourceFactory.createDataSource(h2Dir, 2);
+        LOG.info("Registry H2 DataSource 已创建: {}", org.jnfs.common.H2DataSourceFactory.buildJdbcUrl(h2Dir));
+        return ds;
     }
 
     /**

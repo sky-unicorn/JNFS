@@ -66,18 +66,9 @@ public class MySQLMetadataManager extends JdbcMetadataManager {
      * 此处 CREATE TABLE IF NOT EXISTS 对已存在的表/列无副作用（幂等）。
      */
     private void ensureNonAnchorTables(Connection conn) throws SQLException {
-        // node_registry
+        // node_registry（DDL 单一来源：NodeRegistryDdl，含 free_space 列，V6）
         conn.createStatement().execute(
-            "CREATE TABLE IF NOT EXISTS `node_registry` (" +
-            "`node_id` VARCHAR(128) NOT NULL," +
-            "`node_type` VARCHAR(20) NOT NULL COMMENT 'DATANODE / NAMENODE'," +
-            "`host` VARCHAR(100) NOT NULL," +
-            "`port` INT NOT NULL," +
-            "`last_heartbeat` DATETIME NOT NULL," +
-            "`create_time` DATETIME DEFAULT CURRENT_TIMESTAMP," +
-            "PRIMARY KEY (`node_id`)," +
-            "KEY `idx_type` (`node_type`)" +
-            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            org.jnfs.common.NodeRegistryDdl.createTableDdl()
         );
         // replication_group（V2 新增）
         conn.createStatement().execute(

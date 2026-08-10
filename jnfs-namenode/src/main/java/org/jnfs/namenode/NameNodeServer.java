@@ -169,7 +169,8 @@ public class NameNodeServer {
                 LOG.warn("关闭 ReplicationGroupStore 失败", e);
             }
         }
-        // 关闭 JDBC 元数据 DataSource（mysql/H2 共享池；H2 单进程文件锁必须在进程退出前释放）
+        // 关闭 JDBC 元数据 DataSource（mysql/H2 共享池；H2 AUTO_SERVER 混合模式下本进程连接须在
+        // 退出前释放，最后一个退出的进程兜底关闭共享文件库）
         if (metadataManager != null && metadataManager.isJdbcBacked()) {
             try {
                 javax.sql.DataSource ds = metadataManager.getDataSource();

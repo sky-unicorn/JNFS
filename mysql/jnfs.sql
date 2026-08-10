@@ -11,7 +11,7 @@
  Target Server Version : 80020
  File Encoding         : 65001
 
- Date: 05/08/2026 (V5 schema — H2 嵌入式文件库复用同一 schema，无 DDL 变更)
+ Date: 10/08/2026 (V6 schema — node_registry 增 free_space 列，支撑 Registry 节点注册持久化)
 */
 
 SET NAMES utf8mb4;
@@ -28,9 +28,9 @@ CREATE TABLE `schema_version` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='schema 版本记录';
 
 -- ----------------------------
--- Records of schema_version (V5)
+-- Records of schema_version (V6)
 -- ----------------------------
-INSERT INTO `schema_version` VALUES (5, NOW());
+INSERT INTO `schema_version` VALUES (6, NOW());
 
 -- ----------------------------
 -- Table structure for node_registry
@@ -42,6 +42,7 @@ CREATE TABLE `node_registry`  (
   `host` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '节点IP地址',
   `port` int NOT NULL COMMENT '节点端口',
   `last_heartbeat` datetime(0) NOT NULL COMMENT '最后心跳时间',
+  `free_space` bigint NOT NULL DEFAULT 0 COMMENT 'DataNode剩余空间(字节); NameNode=0',
   `create_time` datetime(0) NULL DEFAULT CURRENT_TIMESTAMP(0),
   PRIMARY KEY (`node_id`) USING BTREE,
   INDEX `idx_type`(`node_type`) USING BTREE

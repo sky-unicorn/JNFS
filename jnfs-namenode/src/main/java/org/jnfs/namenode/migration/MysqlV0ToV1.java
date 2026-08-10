@@ -121,17 +121,10 @@ public class MysqlV0ToV1 implements MigrationStep {
     }
 
     private void createNodeRegistryIfNotExists(Connection conn) throws SQLException {
+        // DDL 单一来源：NodeRegistryDdl（含 free_space 列，V6）。
+        // 与 MySQLMetadataManager.ensureNonAnchorTables 及 Registry 启动自建共用同一份 DDL，避免 schema 漂移。
         conn.createStatement().executeUpdate(
-                "CREATE TABLE IF NOT EXISTS `node_registry` ("
-                        + "`node_id` VARCHAR(128) NOT NULL COMMENT '节点唯一标识', "
-                        + "`node_type` VARCHAR(20) NOT NULL COMMENT '节点类型: DATANODE / NAMENODE', "
-                        + "`host` VARCHAR(100) NOT NULL COMMENT '节点IP地址', "
-                        + "`port` INT NOT NULL COMMENT '节点端口', "
-                        + "`last_heartbeat` DATETIME NOT NULL COMMENT '最后心跳时间', "
-                        + "`create_time` DATETIME DEFAULT CURRENT_TIMESTAMP, "
-                        + "PRIMARY KEY (`node_id`), "
-                        + "KEY `idx_type` (`node_type`)"
-                        + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='节点注册表'"
+                org.jnfs.common.NodeRegistryDdl.createTableDdl()
         );
         LOG.info("MysqlV0ToV1: node_registry 表已确保存在");
     }

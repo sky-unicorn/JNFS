@@ -85,8 +85,8 @@ class H2MigrationChainTest {
         MigrationResult first = MigrationRunner.run(StorageMode.H2, dataDir, dataSource);
         assertTrue(first.isSuccess(), "H2 首次迁移应成功: " + first.getMessage());
 
-        // schema_version = 5
-        assertEquals(5, readSchemaVersion(), "迁移后 schema_version 应为 5");
+        // schema_version = 6
+        assertEquals(6, readSchemaVersion(), "迁移后 schema_version 应为 6");
 
         // mysql/jnfs.sql 全部表存在
         try (Connection conn = dataSource.getConnection()) {
@@ -95,6 +95,9 @@ class H2MigrationChainTest {
                 assertTrue(dialect.tableExists(conn, table),
                         "H2 全链建表后表 " + table + " 应存在");
             }
+            // V6：node_registry.free_space 列存在
+            assertTrue(dialect.columnExists(conn, "node_registry", "free_space"),
+                    "V6 后 node_registry.free_space 列应存在");
         }
 
         // 种子行（V2→V3 写入）应存在
@@ -106,7 +109,7 @@ class H2MigrationChainTest {
         // === 重跑：幂等无副作用无异常 ===
         MigrationResult second = MigrationRunner.run(StorageMode.H2, dataDir, dataSource);
         assertTrue(second.isSuccess(), "H2 重跑迁移应成功: " + second.getMessage());
-        assertEquals(5, readSchemaVersion(), "重跑后 schema_version 仍应为 5");
+        assertEquals(6, readSchemaVersion(), "重跑后 schema_version 仍应为 6");
         try (Connection conn = dataSource.getConnection()) {
             JdbcDialect dialect = JdbcDialect.dialectFor(StorageMode.H2);
             for (String table : ALL_TABLES) {

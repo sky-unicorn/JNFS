@@ -1,6 +1,5 @@
 package org.jnfs.namenode;
 
-import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.jnfs.common.migration.JdbcDialect;
 import org.jnfs.common.migration.StorageMode;
@@ -41,28 +40,17 @@ public class H2MetadataManager extends JdbcMetadataManager {
     /**
      * 构建本地 H2 嵌入式文件库数据源。
      * <p>
-     * URL {@code jdbc:h2:file:<dataDir>/jnfs;MODE=MariaDB;DATABASE_TO_LOWER=TRUE;
-     * CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_ON_EXIT=FALSE}，
-     * HikariCP maximumPoolSize=2（嵌入式单进程，无需高并发池）。
-     * <p>
-     * 路径用正斜杠归一化，避免 Windows 反斜杠在 JDBC URL 中被当作转义符。
+     * 委托 {@link org.jnfs.common.H2DataSourceFactory}（单一来源），URL 含
+     * {@code AUTO_SERVER=TRUE} 混合模式：单机打包下 Registry 与 NameNode 是两个独立 JVM 进程，
+     * 共享同一条 H2 文件库（{@code <dataDir>/jnfs.mv.db}）必须开启 AUTO_SERVER，否则第二个进程
+     * 打开文件会因独占锁失败。HikariCP maximumPoolSize=2（嵌入式，无需高并发池）。
      *
      * @param dataDir 数据目录（由 {@link org.jnfs.common.DataDirResolver#dataDir()} 解析）
      * @return 配置好的 HikariDataSource（调用方持有其生命周期）
      */
     public static HikariDataSource createLocalDataSource(File dataDir) {
-        String dir = dataDir.getAbsolutePath().replace('\\', '/');
-        String url = "jdbc:h2:file:" + dir + "/jnfs"
-                + ";MODE=MariaDB"
-                + ";DATABASE_TO_LOWER=TRUE"
-                + ";CASE_INSENSITIVE_IDENTIFIERS=TRUE"
-                + ";DB_CLOSE_ON_EXIT=FALSE";
-        HikariConfig config = new HikariConfig();
-        config.setJdbcUrl(url);
-        config.setUsername("sa");
-        config.setPassword("");
-        config.setMaximumPoolSize(2);
-        LOG.info("H2 嵌入式文件库数据源已创建: {}", url);
-        return new HikariDataSource(config);
+        HikariDataSource ds = org.jnfs.common.H2DataSourceFactory.createDataSource(dataDir, 2);
+        LOG.info("H2 嵌入式文件库数据源已创建: {}", org.jnfs.common.H2DataSourceFactory.buildJdbcUrl(dataDir));
+        return ds;
     }
 }

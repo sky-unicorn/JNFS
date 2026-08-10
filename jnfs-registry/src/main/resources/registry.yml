@@ -28,8 +28,9 @@ storage:
     password: jnfs@123
 
   # H2 文件库路径（仅 mode: h2 时生效）
-  # Registry 自身不连 H2（由 NameNode 进程独享），此处 path 仅序列化进 storage payload，
-  # 由 NameNode 拉取后定位 H2 文件。留空表示 NameNode 用 DataDirResolver 默认解析。
+  # Registry 与 NameNode 共享同一 H2 文件库（AUTO_SERVER 混合模式，单机打包两进程同机）。
+  # 此处 path 同时决定两者定位 H2 文件的位置：Registry 启动连库 / 序列化进 storage payload
+  # 供 NameNode 拉取。留空表示两者都用 DataDirResolver 默认解析（APP_HOME）。
   h2:
     path: ""
 
