@@ -1,8 +1,10 @@
 <script setup>
 import { ref, computed, watch, onUnmounted, h } from 'vue'
 import { Modal, message } from 'ant-design-vue'
+import { SettingOutlined } from '@ant-design/icons-vue'
 import { apiGet, apiPost, noRedundancy, storageMode } from '../../api/client'
 import StatCard from '../../components/StatCard.vue'
+import PolicyView from './PolicyView.vue'
 
 /** HTML 实体转义：用于 Modal.confirm 拼接 innerHTML 之前先对动态值（taskId）做转义 */
 function escapeHtml(s) {
@@ -141,18 +143,33 @@ watch(
 onUnmounted(stopPolling)
 
 defineExpose({ loadSync })
+
+/* ===================== 同步策略子窗口 ===================== */
+const policyVisible = ref(false)
+function openPolicy() {
+  policyVisible.value = true
+}
 </script>
 
 <template>
   <div>
     <div class="section-bar">
       <h2>对账同步</h2>
-      <a-button
-        type="primary"
-        :loading="triggering"
-        :disabled="noRedundancy"
-        @click="triggerSync"
-      >手动触发全量对账</a-button>
+      <a-space>
+        <a-button
+          :disabled="noRedundancy"
+          @click="openPolicy"
+        >
+          <template #icon><SettingOutlined /></template>
+          同步策略
+        </a-button>
+        <a-button
+          type="primary"
+          :loading="triggering"
+          :disabled="noRedundancy"
+          @click="triggerSync"
+        >手动触发全量对账</a-button>
+      </a-space>
     </div>
 
     <a-row :gutter="[16, 16]" style="margin-bottom: 16px">
@@ -213,6 +230,16 @@ defineExpose({ loadSync })
     <a-typography-text type="secondary" style="display: block; text-align: right; margin-top: 8px; font-size: 0.8rem;">
       数据每 5 秒自动刷新
     </a-typography-text>
+
+    <a-modal
+      v-model:open="policyVisible"
+      title="同步策略"
+      width="720px"
+      :footer="null"
+      destroyOnClose
+    >
+      <PolicyView :active="policyVisible" />
+    </a-modal>
   </div>
 </template>
 
