@@ -45,8 +45,35 @@ public class ExampleApp {
 
     private static final String TOKEN = SecurityConfig.getToken();
 
+    // 服务地址（启动时输入；注册中心模式默认 5367，直连 NameNode 模式默认 5368）
+    private static String SERVER_HOST = "localhost";
+    private static int SERVER_PORT = 5367;
+    // 连接方式：true=直连 NameNode，false=注册中心 Registry（默认）
+    private static boolean useDirectMode = false;
+
     public static void main(String[] args) {
         LOG.info("=== JNFS 综合测试工具 ===");
+
+        Scanner scanner = new Scanner(System.in);
+
+        // 选择连接方式：默认注册中心（非直连），通吃单机/集群部署
+        System.out.print("请选择连接方式 (1=注册中心 Registry, 2=直连 NameNode) [默认 1]: ");
+        useDirectMode = "2".equals(scanner.nextLine().trim());
+
+        System.out.print("请输入主机 (默认 localhost): ");
+        String hostInput = scanner.nextLine().trim();
+        if (!hostInput.isEmpty()) {
+            SERVER_HOST = hostInput;
+        }
+
+        // 端口默认随模式：注册中心 5367 / 直连 NameNode 5368
+        int defaultPort = useDirectMode ? 5368 : 5367;
+        SERVER_PORT = readInt(scanner, "请输入端口", defaultPort);
+
+        LOG.info("连接方式: {} | 地址: {}:{}",
+                useDirectMode ? "直连 NameNode" : "注册中心 Registry",
+                SERVER_HOST, SERVER_PORT);
+
         LOG.info("1. 标准文件上传与下载测试 (Standard Test)");
         LOG.info("2. 连接池并发 (测试Connection Pool Test)");
         LOG.info("3. 路径遍历漏洞测试 (Path Traversal Security Test)");
@@ -56,7 +83,6 @@ public class ExampleApp {
         LOG.info("7. 批量暴力测试 (Brutal Batch Test)");
         LOG.info("请输入测试编号 [1-7]: ");
 
-        Scanner scanner = new Scanner(System.in);
         String choice = scanner.nextLine().trim();
 
         try {
@@ -93,9 +119,21 @@ public class ExampleApp {
         }
     }
 
+    /**
+     * 按启动时选择的连接方式创建 Driver：
+     *   直连模式  -> new JNFSDriver(host, port)         (直接打 NameNode)
+     *   注册中心  -> JNFSDriver.useRegistry(host, port) (经 Registry 发现 NameNode)
+     */
+    private static JNFSDriver createDriver() {
+        if (useDirectMode) {
+            return new JNFSDriver(SERVER_HOST, SERVER_PORT);
+        }
+        return JNFSDriver.useRegistry(SERVER_HOST, SERVER_PORT);
+    }
+
     // --- 1. 标准上传下载测试 ---
     private static void runStandardTest(Scanner scanner) {
-        JNFSDriver driver = new JNFSDriver("localhost", 5368);
+        JNFSDriver driver = createDriver();
         try {
             // Verify connection before entering interactive loop
             System.out.println("=== Verifying connection to NameNode ===");
@@ -175,7 +213,7 @@ public class ExampleApp {
             }
         }
 
-        JNFSDriver driver = new JNFSDriver("localhost", 5368);
+        JNFSDriver driver = createDriver();
         int threads = 5;
         int requestsPerThread = 4;
         ExecutorService executor = Executors.newFixedThreadPool(threads);
@@ -414,7 +452,7 @@ public class ExampleApp {
         System.out.printf("JVM 堆上限: %d MB  (建议 -Xmx≥512m)%n", heapMax);
 
         // --- 连通性检查 ---
-        JNFSDriver driver = new JNFSDriver("localhost", 5368);
+        JNFSDriver driver = createDriver();
         try {
             ConnectionStatus status = driver.initialize();
             printConnectionStatus(status);
