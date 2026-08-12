@@ -65,6 +65,11 @@ public class NameNodeServer {
 
     private static final Logger LOG = LoggerFactory.getLogger(NameNodeServer.class);
 
+    /** 启动期拉取 storage 配置的总体重试预算（Registry 可能仍在初始化，如 H2 首次建库） */
+    private static final long STORAGE_CONFIG_FETCH_MAX_WAIT_MS = 60_000L;
+    /** 启动期拉取 storage 配置失败后的重试间隔 */
+    private static final long STORAGE_CONFIG_FETCH_RETRY_INTERVAL_MS = 2_000L;
+
     private final int port;
     private final String advertisedHost;
     private final String nodeId;
@@ -543,9 +548,11 @@ public class NameNodeServer {
     }
 
     /**
-     * 启动期一次性从 Registry 拉取 storage 配置（AES 加密传输）。
+     * 启动期从 Registry 拉取 storage 配置（AES 加密传输）。
      * <p>
-     * 多地址 failover：任一 Registry 成功即返回；全部失败抛异常，调用方负责拒绝启动。
+     * 多地址 failover：任一 Registry 成功即返回；全部失败按 {@link #STORAGE_CONFIG_FETCH_RETRY_INTERVAL_MS}
+     * 间隔重试，直至 {@link #STORAGE_CONFIG_FETCH_MAX_WAIT_MS} 预算耗尽，此时抛异常由调用方拒绝启动。
+     * 重试是为了容忍 Registry 与 NameNode 同时启动的时序竞态（Registry H2 首次建库可能耗时数秒到十几秒）。
      * 解密失败（HMAC 校验不通过 / 密钥不匹配）也会抛异常，安全失败。
      *
      * @param addresses Registry 地址列表
@@ -553,33 +560,47 @@ public class NameNodeServer {
      */
     private static StorageConfig fetchStorageConfigFromRegistry(List<InetSocketAddress> addresses) {
         NioEventLoopGroup group = new NioEventLoopGroup();
+        long deadline = System.currentTimeMillis() + STORAGE_CONFIG_FETCH_MAX_WAIT_MS;
         try {
-            for (InetSocketAddress addr : addresses) {
-                try {
-                    Bootstrap b = NettyClientBootstrap.createWithHandler(group,
-                            new StorageConfigFetchHandler());
-                    Channel ch = NettyClientBootstrap.connectSync(b,
-                            addr.getHostString(), addr.getPort(), 6000);
+            while (true) {
+                for (InetSocketAddress addr : addresses) {
+                    StorageConfigFetchHandler handler = new StorageConfigFetchHandler();
                     try {
-                        Packet req = new Packet();
-                        req.setCommandType(CommandType.REGISTRY_GET_STORAGE_CONFIG);
-                        req.setToken(Constants.getValidToken());
-                        ch.writeAndFlush(req);
+                        Bootstrap b = NettyClientBootstrap.createWithHandler(group, handler);
+                        Channel ch = NettyClientBootstrap.connectSync(b,
+                                addr.getHostString(), addr.getPort(), 6000);
+                        try {
+                            Packet req = new Packet();
+                            req.setCommandType(CommandType.REGISTRY_GET_STORAGE_CONFIG);
+                            req.setToken(Constants.getValidToken());
+                            ch.writeAndFlush(req);
 
-                        Packet resp = StorageConfigFetchHandler.waitResponse(5000);
-                        if (resp != null
-                                && resp.getCommandType() == CommandType.REGISTRY_RESPONSE_STORAGE_CONFIG) {
-                            byte[] plain = new SecurityUtil(SecurityConfig.getAesKey())
-                                    .decryptBytes(resp.getData());
-                            return StorageConfig.parse(new String(plain, StandardCharsets.UTF_8));
+                            Packet resp = handler.waitResponse(5000);
+                            if (resp != null
+                                    && resp.getCommandType() == CommandType.REGISTRY_RESPONSE_STORAGE_CONFIG) {
+                                byte[] plain = new SecurityUtil(SecurityConfig.getAesKey())
+                                        .decryptBytes(resp.getData());
+                                return StorageConfig.parse(new String(plain, StandardCharsets.UTF_8));
+                            }
+                            LOG.warn("Registry ({}) 返回异常响应: {}",
+                                    addr, resp != null ? resp.getCommandType() : "null");
+                        } finally {
+                            ch.close().sync();
                         }
-                        LOG.warn("Registry ({}) 返回异常响应: {}",
-                                addr, resp != null ? resp.getCommandType() : "null");
-                    } finally {
-                        ch.close().sync();
+                    } catch (Exception e) {
+                        LOG.warn("从 Registry 拉取 storage 配置失败 ({}): {}", addr, e.getMessage());
                     }
-                } catch (Exception e) {
-                    LOG.warn("从 Registry 拉取 storage 配置失败 ({}): {}", addr, e.getMessage());
+                }
+                if (System.currentTimeMillis() >= deadline) {
+                    break;
+                }
+                LOG.info("所有 Registry 均不可达，{}ms 后重试（剩余 {}ms）...",
+                        STORAGE_CONFIG_FETCH_RETRY_INTERVAL_MS, deadline - System.currentTimeMillis());
+                try {
+                    Thread.sleep(STORAGE_CONFIG_FETCH_RETRY_INTERVAL_MS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
                 }
             }
             throw new RuntimeException("所有 Registry 地址均不可达，无法拉取 storage 配置");
@@ -706,27 +727,27 @@ public class NameNodeServer {
 
     /**
      * 启动期拉取 storage 配置的临时 Handler，用 CompletableFuture 同步等待响应。
-     * 仅在 main() 单线程下触发一次，PROMISE 单次使用，无并发问题。
+     * 仅在 main() 单线程下触发，无并发问题。每次连接使用新实例（避免 static 状态被重试复用）。
      */
     private static class StorageConfigFetchHandler extends SimpleChannelInboundHandler<Packet> {
 
-        private static final CompletableFuture<Packet> PROMISE = new CompletableFuture<>();
+        private final CompletableFuture<Packet> promise = new CompletableFuture<>();
 
-        static Packet waitResponse(long timeoutMs) throws Exception {
-            return PROMISE.get(timeoutMs, TimeUnit.MILLISECONDS);
+        Packet waitResponse(long timeoutMs) throws Exception {
+            return promise.get(timeoutMs, TimeUnit.MILLISECONDS);
         }
 
         @Override
         protected void channelRead0(ChannelHandlerContext ctx, Packet packet) {
             if (packet.getCommandType() == CommandType.REGISTRY_RESPONSE_STORAGE_CONFIG
                     || packet.getCommandType() == CommandType.ERROR) {
-                PROMISE.complete(packet);
+                promise.complete(packet);
             }
         }
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-            PROMISE.completeExceptionally(cause);
+            promise.completeExceptionally(cause);
             ctx.close();
         }
     }

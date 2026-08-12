@@ -9,9 +9,32 @@ PID_DIR="$APP_HOME/pids"
 
 SERVICE=$1
 
+# 等待 Registry RPC 端口就绪。Registry 首次启动需初始化 H2 文件库，在 Linux 上可能耗时十几秒，
+# 若不等待，NameNode/DataNode 会在 Registry 尚未监听时连接失败。
+wait_for_registry() {
+    local port="$1"
+    local timeout=60
+    local waited=0
+    echo "Waiting for Registry (port $port)..."
+    while [ $waited -lt $timeout ]; do
+        if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+            echo "Registry is ready."
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo "WARNING: Registry (port $port) not ready after ${timeout}s, continuing anyway."
+    return 1
+}
+
 if [ -z "$SERVICE" ]; then
     echo "Starting all services..."
     "$DIR/start.sh" registry
+    # 从 conf/registry.yml 解析 Registry RPC 端口（默认 5367），等待就绪后再启动 NameNode/DataNode
+    REGISTRY_PORT=$(awk '/^server:/{found=1} found && /port:/{gsub(/[^0-9]/,""); print; exit}' "$CONF_DIR/registry.yml" 2>/dev/null)
+    REGISTRY_PORT=${REGISTRY_PORT:-5367}
+    wait_for_registry "$REGISTRY_PORT"
     "$DIR/start.sh" namenode
     "$DIR/start.sh" datanode
     exit 0

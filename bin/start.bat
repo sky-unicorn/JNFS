@@ -14,6 +14,13 @@ set SERVICE=%1
 if "%SERVICE%"=="" (
     echo Starting all services...
     call "%~f0" registry
+    rem 从 conf\registry.yml 解析 Registry RPC 端口（默认 5367）
+    set "REGISTRY_PORT="
+    for /f "tokens=*" %%p in ('powershell -NoProfile -Command "$m = Select-String -Path '%CONF_DIR%\registry.yml' -Pattern 'port:\s*(\d+)' | Select-Object -First 1; if($m){$m.Matches.Groups[1].Value}"') do set "REGISTRY_PORT=%%p"
+    if not defined REGISTRY_PORT set "REGISTRY_PORT=5367"
+    rem 等待 Registry 就绪（首次启动初始化 H2 可能较慢），避免 NameNode/DataNode 连接失败
+    echo Waiting for Registry (port %REGISTRY_PORT%)...
+    powershell -NoProfile -Command "$i=0;$ok=$false;while($i -lt 60){try{$t=New-Object System.Net.Sockets.TcpClient;$t.Connect('127.0.0.1',%REGISTRY_PORT%);$t.Close();$ok=$true;break}catch{Start-Sleep -Seconds 1};$i++};if($ok){Write-Host 'Registry is ready.'}else{Write-Host 'WARNING: Registry (port %REGISTRY_PORT%) not ready after 60s, continuing anyway.'}"
     call "%~f0" namenode
     call "%~f0" datanode
     goto :eof
