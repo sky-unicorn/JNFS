@@ -44,6 +44,14 @@
             <version>3.1.8</version>
         </dependency>
 
+        <!-- 后台文件类型嗅探（FileTypeDetectScheduler）：仅 tika-core（含内置 mime 库），
+             只对 DataNode 读回的 ≤8KB 文件头做检测，不进入上传/下载主链路 -->
+        <dependency>
+            <groupId>org.apache.tika</groupId>
+            <artifactId>tika-core</artifactId>
+            <version>2.9.2</version>
+        </dependency>
+
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>

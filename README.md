@@ -335,6 +335,16 @@ ConnectionStatus current = driver.getConnectionStatus();
 - `{"drain": false}` 可解除排空。组级分段锁避免排空后组内无可用节点。
 - 需要在线提升某副本为主时，可用 `POST /api/nodes/{nodeId}/promote`（自动把旧 primary 降为 secondary，保证单 primary 不变式）。
 
+## 文件管理（Dashboard）
+
+Dashboard「文件管理」页可视化查询已上传文件：分页列表 + **存储节点 / 文件类型 / 文件名关键字**筛选，展示文件大小、类型、副本所在节点（主/备角色与损坏状态）、创建时间、存储 ID 与哈希（可复制）。数据来源为与 NameNode 共享的元数据库（h2 / mysql 同库直查），不经过 NameNode RPC，对存储/下载链路零影响。
+
+- API：`GET /api/files?page=&pageSize=&nodeId=&fileType=&keyword=`（服务端分页）、`GET /api/files/types`（类型下拉候选）。
+- **文件类型识别（两级，不影响上传/下载性能）**：
+  1. 上传提交时按文件名扩展名即时记录 `file_metadata.file_type`（微秒级纯函数）；
+  2. 后台 `FileTypeDetectScheduler`（daemon、每 10s 一批 20 个、空闲退避）对 `file_type IS NULL`（无扩展名/扩展名不可靠）的文件，向 DataNode 读取**解密后的文件头 ≤8KB**（`DATA_HEAD_READ` 指令），用 Tika 内容嗅探兜底并回写；同时回填存量文件的 `file_size`（历史数据大小未知，记为 NULL，展示为"未知"）。
+- `file` 模式（已退役）下文件 API 返回 503，页面展示空态提示。
+
 ## 综合测试工具（ExampleApp）
 
 `jnfs-example` 模块提供交互式综合测试控制台（**源码级运行，不随发布包分发**），在 IDE 中运行 `org.jnfs.example.ExampleApp` 即可。启动时可选择连接方式：**注册中心（Registry，默认 5367）** 或 **直连 NameNode（默认 5368）**。包含 7 类测试：
@@ -349,10 +359,10 @@ ConnectionStatus current = driver.getConnectionStatus();
 
 ## 数据迁移与升级
 
-JNFS 内置版本化迁移框架（`MigrationRunner`，当前 `CURRENT_VERSION = 6`），支持 `file → h2`、`file → mysql`、以及 schema 版本递增迁移：
+JNFS 内置版本化迁移框架（`MigrationRunner`，当前 `CURRENT_VERSION = 7`），支持 `file → h2`、`file → mysql`、以及 schema 版本递增迁移：
 
 - 迁移步骤位于 `jnfs-namenode/.../migration/`，注册于 `META-INF/migrations/`。
-- JDBC 步骤经方言路由同时覆盖 `h2` / `mysql`（如 `JdbcV5ToV6`，V6 为 `node_registry` 增加 `free_space` 列，支撑 Registry 节点注册持久化）。
+- JDBC 步骤经方言路由同时覆盖 `h2` / `mysql`（如 `JdbcV5ToV6` 为 `node_registry` 增加 `free_space` 列；`JdbcV6ToV7` 为 `file_metadata` 增加 `file_type` 列并回填存量扩展名类型、将历史 `file_size=0` 归一为 NULL）。
 - 迁移失败拒绝启动（`System.exit(2)`），保证新旧数据不混跑。
 - `mysql/jnfs.sql` 始终保持最新完整 schema（含 `schema_version` 表）。
 

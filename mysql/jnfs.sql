@@ -11,7 +11,7 @@
  Target Server Version : 80020
  File Encoding         : 65001
 
- Date: 10/08/2026 (V6 schema — node_registry 增 free_space 列，支撑 Registry 节点注册持久化)
+ Date: 10/08/2026 (V7 schema — file_metadata 增 file_type 列；file_size 语义 NULL=未知)
 */
 
 SET NAMES utf8mb4;
@@ -28,9 +28,9 @@ CREATE TABLE `schema_version` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='schema 版本记录';
 
 -- ----------------------------
--- Records of schema_version (V6)
+-- Records of schema_version (V7)
 -- ----------------------------
-INSERT INTO `schema_version` VALUES (6, NOW());
+INSERT INTO `schema_version` VALUES (7, NOW());
 
 -- ----------------------------
 -- Table structure for node_registry
@@ -78,8 +78,9 @@ CREATE TABLE `file_metadata`  (
   `storage_id` char(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '存储ID (UUID), 主键',
   `filename` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '原始文件名',
   `file_hash` char(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '文件哈希 (SHA-256)',
-  `file_size` bigint NULL DEFAULT 0 COMMENT '文件大小 (字节)',
+  `file_size` bigint NULL DEFAULT NULL COMMENT '文件大小 (字节, NULL=未知)',
   `replication_factor` tinyint NOT NULL DEFAULT 1 COMMENT '目标副本数；1=单副本，2/3=组内节点数',
+  `file_type` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NULL DEFAULT NULL COMMENT '文件类型标签(扩展名识别/Tika内容嗅探), NULL=未知',
   `create_time` datetime(0) NULL DEFAULT CURRENT_TIMESTAMP(0) COMMENT '创建时间',
   `update_time` datetime(0) NULL DEFAULT CURRENT_TIMESTAMP(0) ON UPDATE CURRENT_TIMESTAMP(0),
   PRIMARY KEY (`storage_id`) USING BTREE,

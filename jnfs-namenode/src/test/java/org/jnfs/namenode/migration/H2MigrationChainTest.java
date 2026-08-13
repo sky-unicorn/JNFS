@@ -29,14 +29,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * H2 迁移链集成测试：验证 H2 全链建表 + 幂等重跑 + file→H2 数据导入。
  * <p>
  * H2 全新部署首启不走 "写 CURRENT_VERSION" 捷径（detectH2Version freshDeployHint=false），
- * 版本 0 起步走完整迁移链（V0→V1→V2→V3→V4→V5），全部表由迁移步骤自身创建。
+ * 版本 0 起步走完整迁移链（V0→V1→...→V7），全部表由迁移步骤自身创建。
  * <p>
  * 覆盖：
  * <ol>
- *   <li>全链建表：schema_version=5，mysql/jnfs.sql 中全部 10 张表存在</li>
- *   <li>幂等重跑：第二次 run() 无副作用、无异常、版本仍为 5</li>
+ *   <li>全链建表：schema_version=7，mysql/jnfs.sql 中全部 10 张表存在</li>
+ *   <li>幂等重跑：第二次 run() 无副作用、无异常、版本仍为 7</li>
  *   <li>FileToH2Importer：规整后的 namenode_meta.log 导入 file_metadata/file_location，
- *       重入（标记跳过）不产生重复行</li>
+ *       重入（标记跳过）不产生重复行；导入行带扩展名推导的 file_type、file_size 为 NULL</li>
  * </ol>
  */
 class H2MigrationChainTest {
@@ -85,8 +85,8 @@ class H2MigrationChainTest {
         MigrationResult first = MigrationRunner.run(StorageMode.H2, dataDir, dataSource);
         assertTrue(first.isSuccess(), "H2 首次迁移应成功: " + first.getMessage());
 
-        // schema_version = 6
-        assertEquals(6, readSchemaVersion(), "迁移后 schema_version 应为 6");
+        // schema_version = 7
+        assertEquals(7, readSchemaVersion(), "迁移后 schema_version 应为 7");
 
         // mysql/jnfs.sql 全部表存在
         try (Connection conn = dataSource.getConnection()) {
@@ -98,6 +98,9 @@ class H2MigrationChainTest {
             // V6：node_registry.free_space 列存在
             assertTrue(dialect.columnExists(conn, "node_registry", "free_space"),
                     "V6 后 node_registry.free_space 列应存在");
+            // V7：file_metadata.file_type 列存在
+            assertTrue(dialect.columnExists(conn, "file_metadata", "file_type"),
+                    "V7 后 file_metadata.file_type 列应存在");
         }
 
         // 种子行（V2→V3 写入）应存在
@@ -109,7 +112,7 @@ class H2MigrationChainTest {
         // === 重跑：幂等无副作用无异常 ===
         MigrationResult second = MigrationRunner.run(StorageMode.H2, dataDir, dataSource);
         assertTrue(second.isSuccess(), "H2 重跑迁移应成功: " + second.getMessage());
-        assertEquals(6, readSchemaVersion(), "重跑后 schema_version 仍应为 6");
+        assertEquals(7, readSchemaVersion(), "重跑后 schema_version 仍应为 7");
         try (Connection conn = dataSource.getConnection()) {
             JdbcDialect dialect = JdbcDialect.dialectFor(StorageMode.H2);
             for (String table : ALL_TABLES) {
@@ -154,9 +157,11 @@ class H2MigrationChainTest {
 
         // legacy file 导入数据为单副本：file_metadata.replication_factor 均为默认 1
         // （用户可在 Dashboard 配置冗余组后，新上传文件按组大小多副本）
+        // V7 语义：导入行 file_type 按扩展名推导、file_size 为 NULL（大小未知，后台回填）
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(
-                     "SELECT storage_id, filename, file_hash, replication_factor FROM file_metadata ORDER BY storage_id")) {
+                     "SELECT storage_id, filename, file_hash, replication_factor, file_type, file_size "
+                             + "FROM file_metadata ORDER BY storage_id")) {
             // 直接断言最小契约：replication_factor 全部为 1
             try (ResultSet rs = ps.executeQuery()) {
                 int rows = 0;
@@ -164,6 +169,13 @@ class H2MigrationChainTest {
                     rows++;
                     assertEquals(1, rs.getInt("replication_factor"),
                             "legacy file 导入数据为单副本：replication_factor 应为 1");
+                    String filename = rs.getString("filename");
+                    String expectedType = "a.txt".equals(filename) ? "txt" : "bin";
+                    assertEquals(expectedType, rs.getString("file_type"),
+                            filename + " 导入行 file_type 应扩展名推导为 " + expectedType);
+                    long size = rs.getLong("file_size");
+                    assertTrue(rs.wasNull(), "导入行 file_size 应为 NULL（大小未知）");
+                    assertTrue(size == 0, "wasNull 成立时取值为 0（防御断言）");
                 }
                 assertEquals(2, rows, "file_metadata 应有 2 行");
             }

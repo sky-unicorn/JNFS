@@ -112,6 +112,13 @@ public class DashboardServer {
                 addProtected("/api/replication/sync/", replicationHandler, authFilter);
                 addProtected("/api/replication/alerts", replicationHandler, authFilter);
                 LOG.info("Dashboard: 冗余存储管理 API 已注册（12 端点）");
+
+                // 文件管理 API（/api/files 分页查询 + /api/files/types 类型下拉；与元数据库同库直查）
+                org.jnfs.registry.api.FilesApiHandler filesHandler =
+                        new org.jnfs.registry.api.FilesApiHandler(metadataDataSource);
+                addProtected("/api/files", filesHandler, authFilter);
+                addProtected("/api/files/", filesHandler, authFilter);
+                LOG.info("Dashboard: 文件管理 API 已注册（/api/files, /api/files/types）");
             } else {
                 // S6: metadataDataSource==null 时冗余存储 API 统一返回 JSON 503，而非落到 "/" 返回 HTML
                 // （前端 fetch 期望 JSON，HTML 会让 res.json() 抛错且无法区分"未配置"）。
@@ -129,7 +136,9 @@ public class DashboardServer {
                 addProtected("/api/replication/sync", disabled, authFilter);
                 addProtected("/api/replication/sync/", disabled, authFilter);
                 addProtected("/api/replication/alerts", disabled, authFilter);
-                LOG.info("Dashboard: 元数据库 DataSource 未配置，冗余存储 API 返回 503（{} 模式）",
+                addProtected("/api/files", disabled, authFilter);
+                addProtected("/api/files/", disabled, authFilter);
+                LOG.info("Dashboard: 元数据库 DataSource 未配置，冗余存储/文件管理 API 返回 503（{} 模式）",
                         "h2".equalsIgnoreCase(storageMode) ? "h2" : "file");
             }
 

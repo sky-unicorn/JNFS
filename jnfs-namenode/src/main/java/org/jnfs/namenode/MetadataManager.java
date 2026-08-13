@@ -92,10 +92,13 @@ public abstract class MetadataManager {
      * @param hash              文件 hash
      * @param storageId         存储 ID
      * @param replicationFactor 目标副本数（1=单副本，2/3=组内节点数）
+     * @param fileSize          文件大小（字节，NULL=未知）；Driver 提交协议带真实大小
+     * @param fileType          文件类型标签（扩展名识别，NULL=未知）
      * @param locations         全部副本位置（PRIMARY 恒首位）
      */
     public abstract void logAddFile(String filename, String hash, String storageId,
-                                    int replicationFactor, List<ReplicaLocation> locations) throws IOException;
+                                    int replicationFactor, Long fileSize, String fileType,
+                                    List<ReplicaLocation> locations) throws IOException;
 
     // ==================== 能力探测 ====================
 
