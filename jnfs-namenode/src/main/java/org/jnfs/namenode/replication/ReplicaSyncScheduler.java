@@ -37,7 +37,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.util.concurrent.Future;
 
 /**
- * 夜间对账同步调度器（§7 + 决策 10/11，mysql 模式专用）。
+ * 夜间对账同步调度器（§7 + 决策 10/11，JDBC 模式 mysql/h2 共用）。
  * <p>
  * 职责定位（§7.1）：对账补救，不是副本唯一来源。
  * <ul>
@@ -49,7 +49,7 @@ import io.netty.util.concurrent.Future;
  * 差集计算（§7.2 + M6）：遍历 file_metadata，按行内 replication_factor 判定 expected，
  * 对比 file_location 中 ACTIVE 副本数，缺则生成 PENDING 任务。
  * <p>
- * file 模式不构造本类（单副本无对账需求）。
+ * file 模式已退役；JDBC 模式（mysql 集群 / h2 同机多磁盘）均构造本类。
  */
 public class ReplicaSyncScheduler {
 

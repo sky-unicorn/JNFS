@@ -143,25 +143,25 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
 
     /**
      * 初始化冗余组配置缓存（由 NameNodeServer 启动时调用）。
-     * mysql 模式传入 store 实例；file 模式传 null（冗余短路，走单副本）。
+     * mysql/h2 模式传入 store 实例；未配置时传 null（单副本降级）。
      */
     public static void initReplicationGroupStore(ReplicationGroupStore store) {
         replicationGroupStore = store;
         if (store != null) {
-            LOG.info("NameNodeHandler: 冗余组缓存已注入（mysql 模式，多副本启用）");
+            LOG.info("NameNodeHandler: 冗余组缓存已注入（多副本启用）");
         } else {
-            LOG.info("NameNodeHandler: 冗余组缓存为 null（file 模式，单副本短路）");
+            LOG.info("NameNodeHandler: 冗余组缓存为 null（未配置，单副本）");
         }
     }
 
     /**
      * 初始化对账同步调度器（由 NameNodeServer 启动时调用）。
-     * mysql 模式传入 scheduler 实例；file 模式传 null（对账短路）。
+     * mysql/h2 模式传入 scheduler 实例；未配置时传 null（对账短路）。
      */
     public static void initReplicaSyncScheduler(ReplicaSyncScheduler scheduler) {
         replicaSyncScheduler = scheduler;
         if (scheduler != null) {
-            LOG.info("NameNodeHandler: 对账同步调度器已注入（mysql 模式）");
+            LOG.info("NameNodeHandler: 对账同步调度器已注入（多副本模式）");
         } else {
             LOG.info("NameNodeHandler: 对账同步调度器为 null（file 模式，对账短路）");
         }
@@ -606,7 +606,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         String fileHash = parts[0];
         String nodeId = parts[1];
 
-        // 非 JDBC 模式不处理（file 模式已退役，理论上不会收到；H2 单副本也不会收到）
+        // 非 JDBC 模式不处理（file 模式已退役，理论上不会收到；mysql/h2 均支持副本提交）
         if (!metadataManager.isJdbcBacked()) {
             NettyHandlerHelper.sendError(ctx, "file 模式不支持副本提交");
             return;

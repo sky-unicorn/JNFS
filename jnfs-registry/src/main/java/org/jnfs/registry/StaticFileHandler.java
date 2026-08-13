@@ -262,12 +262,12 @@ public class StaticFileHandler implements HttpHandler {
      * 构造注入到 SPA 的配置 JSON 字面量（不含外层括号）。
      * <ul>
      *   <li>storageMode：白名单 file/h2/mysql，null/其他 → file</li>
-     *   <li>noRedundancy：非 mysql 即为单副本模式</li>
+     *   <li>noRedundancy：仅 file 模式为 true（file 已退役，防御性保留）；h2/mysql 均 false（冗余可用）</li>
      *   <li>authEnabled：由是否传入 AuthManager 决定</li>
      * </ul>
      */
     private String buildConfigJson() {
-        boolean noRedundancy = !"mysql".equals(storageMode);
+        boolean noRedundancy = "file".equals(storageMode);
         return "{\"storageMode\":\"" + storageMode + "\","
                 + "\"noRedundancy\":" + noRedundancy + ","
                 + "\"authEnabled\":" + authEnabled + "}";

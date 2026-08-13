@@ -113,12 +113,11 @@ public class DashboardServer {
                 addProtected("/api/replication/alerts", replicationHandler, authFilter);
                 LOG.info("Dashboard: 冗余存储管理 API 已注册（12 端点）");
             } else {
-                // S6: file/h2 模式下冗余存储 API 统一返回 JSON 503，而非落到 "/" 返回 HTML
-                // （前端 fetch 期望 JSON，HTML 会让 res.json() 抛错且无法区分"未配置"）
-                // h2 为嵌入式单机模式，与 file 一样无冗余，文案区分便于运维识别
-                String disabledReason = "h2".equalsIgnoreCase(storageMode)
-                        ? "metadata API disabled in h2 mode (embedded single-node, no redundancy)"
-                        : "metadata API disabled in file mode";
+                // S6: metadataDataSource==null 时冗余存储 API 统一返回 JSON 503，而非落到 "/" 返回 HTML
+                // （前端 fetch 期望 JSON，HTML 会让 res.json() 抛错且无法区分"未配置"）。
+                // 注意：h2 模式 DataSource 非 null（RegistryServer 为 h2 建 H2 DataSource 作节点持久化
+                // 并传入 Dashboard），故 h2 不会走到本分支——仅 file/未配置 DataSource 场景触发。
+                String disabledReason = "metadata API disabled (no metadata datasource configured)";
                 HttpHandler disabled = exchange -> {
                     org.jnfs.registry.api.JsonHttpUtils.sendError(
                             exchange, 503, disabledReason);

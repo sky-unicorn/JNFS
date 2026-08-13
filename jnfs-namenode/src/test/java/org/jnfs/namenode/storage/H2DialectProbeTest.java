@@ -115,7 +115,7 @@ class H2DialectProbeTest {
     void i_nowMinusInterval() throws SQLException {
         // 探针结论：H2 不支持 "NOW() - INTERVAL n MINUTE" 语法。
         // 回归守护：若未来 H2 支持，此处会红。
-        // mysql 专有的 ReplicaSyncTaskStore 用此方言（H2 单副本不构造该组件，故不触发）。
+        // ReplicaSyncTaskStore.findStaleInFlight 已改用应用侧参数化 Timestamp 避免此方言（H2/mysql 共用零分支）。
         try (Connection c = open(); Statement s = c.createStatement()) {
             assertThrows(SQLException.class, () -> s.executeQuery("SELECT NOW() - INTERVAL 5 MINUTE"));
             // 反向验证替代写法 DATEADD 可用

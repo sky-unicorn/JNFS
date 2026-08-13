@@ -161,7 +161,7 @@ public class RegistryServer {
 
         // mysql 模式：创建单一共享 DataSource（dashboard_user 表、冗余元数据表、node_registry 共用同库）
         // h2 模式：创建指向同一 H2 文件库的 DataSource（与 NameNode 进程共享，AUTO_SERVER 混合模式），
-        //          用于 node_registry 节点注册持久化 + Dashboard 冗余 API（h2 模式下冗余 API 仍 503，仅节点持久化生效）
+        //          用于 node_registry 节点注册持久化 + Dashboard 冗余 API（h2 冗余 API 已启用，支持同机多磁盘多副本）
         // file 模式：不创建 DataSource（FileUserStore + 纯内存节点注册，重启即失）
         com.zaxxer.hikari.HikariDataSource storageDataSource;
         if ("mysql".equalsIgnoreCase(storageMode)) {

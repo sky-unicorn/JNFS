@@ -59,7 +59,7 @@
 - **自动 cancel drain 时的角色回迁**：取消排空时，已迁走的 primary 不自动回迁到原节点（详见 §5.2 决策）。
 - **跨组迁移**：drain 不改变节点所属冗余组（组的成员关系在 `replication_group.node_ids` 里独立维护）。
 - **block 分块 / quorum 写**：保持主文档的整文件副本粒度。
-- **file 模式启用 drain**：与冗余组一样，仅 `storage.mode=mysql` 时启用；file 单机模式不启用冗余，自然也不启用 drain。
+- **file 模式启用 drain**：与冗余组一样，`storage.mode` 为 mysql 或 h2 时启用；file 单机模式不启用冗余，自然也不启用 drain。
 
 ---
 
