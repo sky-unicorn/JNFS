@@ -337,9 +337,9 @@ ConnectionStatus current = driver.getConnectionStatus();
 
 ## 文件管理（Dashboard）
 
-Dashboard「文件管理」页可视化查询已上传文件：分页列表 + **存储节点 / 文件类型 / 文件名关键字**筛选，展示文件大小、类型、副本所在节点（主/备角色与损坏状态）、创建时间、存储 ID 与哈希（可复制）。数据来源为与 NameNode 共享的元数据库（h2 / mysql 同库直查），不经过 NameNode RPC，对存储/下载链路零影响。
+Dashboard「文件管理」页可视化查询已上传文件：分页列表 + **存储节点 / 文件类型 / 存储编号**筛选，展示文件大小、类型、副本所在节点（主/备角色与损坏状态）、创建时间、存储 ID（首列）与哈希（可复制）。数据来源为与 NameNode 共享的元数据库（h2 / mysql 同库直查），不经过 NameNode RPC，对存储/下载链路零影响。
 
-- API：`GET /api/files?page=&pageSize=&nodeId=&fileType=&keyword=`（服务端分页）、`GET /api/files/types`（类型下拉候选）。
+- API：`GET /api/files?page=&pageSize=&nodeId=&fileType=&storageId=`（服务端分页；`storageId` 为存储编号包含匹配）、`GET /api/files/types`（类型下拉候选，`unknown` 恒存在并置顶）。
 - **文件类型识别（两级，不影响上传/下载性能）**：
   1. 上传提交时按文件名扩展名即时记录 `file_metadata.file_type`（微秒级纯函数）；
   2. 后台 `FileTypeDetectScheduler`（daemon、每 10s 一批 20 个、空闲退避）对 `file_type IS NULL`（无扩展名/扩展名不可靠）的文件，向 DataNode 读取**解密后的文件头 ≤8KB**（`DATA_HEAD_READ` 指令），用 Tika 内容嗅探兜底并回写；同时回填存量文件的 `file_size`（历史数据大小未知，记为 NULL，展示为"未知"）。

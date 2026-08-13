@@ -32,14 +32,14 @@ public class FileMetadataDao {
     public static final class Filter {
         public final String nodeId;     // datanode_id 精确匹配（兼容旧数据：datanode_addr 同值兜底由 handler 传入 nodeAddr）
         public final String nodeAddr;   // 与 nodeId 同批传入的 host:port，双列 OR 匹配旧数据
-        public final String fileType;   // 类型标签
-        public final String keyword;    // 文件名关键字（LIKE 模糊匹配）
+        public final String fileType;   // 类型标签（'unknown' 额外匹配 NULL，见 buildWhere）
+        public final String storageId;  // 存储编号（storage_id 包含匹配，通配符转义）
 
-        public Filter(String nodeId, String nodeAddr, String fileType, String keyword) {
+        public Filter(String nodeId, String nodeAddr, String fileType, String storageId) {
             this.nodeId = nodeId;
             this.nodeAddr = nodeAddr;
             this.fileType = fileType;
-            this.keyword = keyword;
+            this.storageId = storageId;
         }
     }
 
@@ -223,29 +223,36 @@ public class FileMetadataDao {
         }
 
         if (filter.fileType != null) {
-            List<String> exts = org.jnfs.common.FileTypeDetector.extensionsOfType(filter.fileType);
-            if (exts.isEmpty()) {
-                // 目录外类型（如 'unknown' 或自定义存值）：仅精确匹配存储值
-                sql.append(" AND m.file_type = ?");
-                params.add(filter.fileType);
+            if ("unknown".equalsIgnoreCase(filter.fileType)) {
+                // 未知 = 显式存值 'unknown' ∪ 尚未回填的 NULL 行（NULL 多为无扩展名文件，
+                // 可识别扩展名的旧行已由 V7 迁移或后台调度器回填）
+                sql.append(" AND (m.file_type = 'unknown' OR m.file_type IS NULL)");
             } else {
-                // 存储值精确匹配 + 旧数据 NULL 行按扩展名兜底（大小写不敏感，扩展名来自内置目录、无注入风险）
-                sql.append(" AND (m.file_type = ? OR (m.file_type IS NULL AND (");
-                params.add(filter.fileType);
-                for (int i = 0; i < exts.size(); i++) {
-                    if (i > 0) {
-                        sql.append(" OR ");
+                List<String> exts = org.jnfs.common.FileTypeDetector.extensionsOfType(filter.fileType);
+                if (exts.isEmpty()) {
+                    // 目录外类型（自定义存值）：仅精确匹配存储值
+                    sql.append(" AND m.file_type = ?");
+                    params.add(filter.fileType);
+                } else {
+                    // 存储值精确匹配 + 旧数据 NULL 行按扩展名兜底（大小写不敏感，扩展名来自内置目录、无注入风险）
+                    sql.append(" AND (m.file_type = ? OR (m.file_type IS NULL AND (");
+                    params.add(filter.fileType);
+                    for (int i = 0; i < exts.size(); i++) {
+                        if (i > 0) {
+                            sql.append(" OR ");
+                        }
+                        sql.append("LOWER(m.filename) LIKE ?");
+                        params.add("%." + exts.get(i));
                     }
-                    sql.append("LOWER(m.filename) LIKE ?");
-                    params.add("%." + exts.get(i));
+                    sql.append(")))");
                 }
-                sql.append(")))");
             }
         }
 
-        if (filter.keyword != null) {
-            sql.append(" AND m.filename LIKE ? ESCAPE '!'");
-            params.add(escapeLike(filter.keyword));
+        if (filter.storageId != null) {
+            // 存储编号包含匹配（storage_id 可能含通配符，按字面转义）
+            sql.append(" AND m.storage_id LIKE ? ESCAPE '!'");
+            params.add(escapeLike(filter.storageId));
         }
         return new Where(sql.toString(), params);
     }

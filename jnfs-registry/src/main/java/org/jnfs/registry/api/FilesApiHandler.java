@@ -20,7 +20,7 @@ import java.util.TreeSet;
  * 路由（仅 GET）：
  * <ul>
  *   <li>{@code /api/files}：分页查询已上传文件，支持
- *       {@code page / pageSize / nodeId(存储节点) / fileType(文件类型) / keyword(文件名关键字)} 筛选；</li>
+ *       {@code page / pageSize / nodeId(存储节点) / fileType(文件类型) / storageId(存储编号)} 筛选；</li>
  *   <li>{@code /api/files/types}：类型下拉候选（元数据库 distinct file_type ∪ 内置扩展名目录）。</li>
  * </ul>
  * 数据源为与 NameNode 共享的元数据库（h2 / mysql 同库）；查询仅走 JDBC，
@@ -71,7 +71,7 @@ public class FilesApiHandler implements HttpHandler {
         int pageSize = Math.min(Math.max(parsePositiveInt(q.get("pageSize"), DEFAULT_PAGE_SIZE), 1), MAX_PAGE_SIZE);
         String nodeId = trimToNull(q.get("nodeId"));
         String fileType = trimToNull(q.get("fileType"));
-        String keyword = trimToNull(q.get("keyword"));
+        String storageId = trimToNull(q.get("storageId"));
 
         // 节点筛选的 host:port 兜底：datanode_id 精确匹配 + datanode_addr 同值匹配旧数据
         String nodeAddr = null;
@@ -83,7 +83,7 @@ public class FilesApiHandler implements HttpHandler {
         }
 
         FileMetadataDao.Page pageResult = dao.queryFiles(
-                new FileMetadataDao.Filter(nodeId, nodeAddr, fileType, keyword), page, pageSize);
+                new FileMetadataDao.Filter(nodeId, nodeAddr, fileType, storageId), page, pageSize);
 
         // 页面内 hash 批量查副本位置
         List<String> hashes = new java.util.ArrayList<>(pageResult.rows.size());
@@ -138,9 +138,10 @@ public class FilesApiHandler implements HttpHandler {
     // ---- GET /api/files/types ----
 
     private void handleTypes(HttpExchange exchange) throws IOException, SQLException {
-        // 元数据库实际存值 ∪ 内置扩展名目录，去重升序
+        // 元数据库实际存值 ∪ 内置扩展名目录，去重升序；'unknown' 恒存在（NULL / unknown 存值行均属未知）
         TreeSet<String> types = new TreeSet<>(dao.distinctStoredTypes());
         types.addAll(FileTypeDetector.knownTypes());
+        types.add("unknown");
 
         StringBuilder sb = new StringBuilder("{\"success\":true,\"types\":[");
         int i = 0;

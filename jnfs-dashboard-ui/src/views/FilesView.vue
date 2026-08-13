@@ -16,8 +16,8 @@ const page = ref(1)
 const pageSize = ref(20)
 
 // 筛选输入态 / 已生效态（点「查询」后对齐生效）
-const filters = ref({ keyword: '', nodeId: null, fileType: null })
-const applied = ref({ keyword: '', nodeId: null, fileType: null })
+const filters = ref({ storageId: '', nodeId: null, fileType: null })
+const applied = ref({ storageId: '', nodeId: null, fileType: null })
 
 // 下拉数据源：存储节点（/api/nodes）、文件类型（/api/files/types）
 const nodes = ref([])
@@ -26,12 +26,15 @@ const types = ref([])
 const nodeOptions = computed(() =>
   nodes.value.map(n => ({
     value: n.nodeId,
-    label: n.nodeId + (n.address ? ' · ' + n.address : '')
+    label: n.address || n.nodeId
   }))
 )
-const typeOptions = computed(() =>
-  types.value.map(t => ({ value: t, label: t === 'unknown' ? '未知' : t }))
-)
+const typeOptions = computed(() => {
+  // 「未知」置顶：JNFS 中 file_type='unknown' 存值与 NULL 行展示均为未知，
+  // 详见 FileMetadataDao#buildWhere 中 'unknown' 匹配存值 ∪ NULL 的语义。
+  const list = types.value.map(t => ({ value: t, label: t === 'unknown' ? '未知' : t }))
+  return [...list.filter(o => o.value === 'unknown'), ...list.filter(o => o.value !== 'unknown')]
+})
 
 /* ===================== 加载 ===================== */
 async function loadFiles() {
@@ -43,7 +46,7 @@ async function loadFiles() {
     params.set('pageSize', pageSize.value)
     if (applied.value.nodeId) params.set('nodeId', applied.value.nodeId)
     if (applied.value.fileType) params.set('fileType', applied.value.fileType)
-    if (applied.value.keyword) params.set('keyword', applied.value.keyword)
+    if (applied.value.storageId) params.set('storageId', applied.value.storageId)
     const d = await apiGet('/api/files?' + params.toString())
     rows.value = d.files || []
     total.value = d.total || 0
@@ -88,8 +91,8 @@ function applyFilters() {
 }
 
 function resetFilters() {
-  filters.value = { keyword: '', nodeId: null, fileType: null }
-  applied.value = { keyword: '', nodeId: null, fileType: null }
+  filters.value = { storageId: '', nodeId: null, fileType: null }
+  applied.value = { storageId: '', nodeId: null, fileType: null }
   page.value = 1
   loadFiles()
 }
@@ -136,13 +139,13 @@ function nodeTagLabel(n) {
 
 /* ===================== 表格列 ===================== */
 const columns = [
-  { title: '文件名', dataIndex: 'filename', key: 'filename', width: '20%' },
+  { title: '存储ID', dataIndex: 'storageId', key: 'storageId', width: '22%' },
   { title: '类型', dataIndex: 'fileType', key: 'fileType', width: '8%' },
   { title: '大小', dataIndex: 'fileSize', key: 'fileSize', width: '10%' },
   { title: '存储节点', dataIndex: 'nodes', key: 'nodes' },
   { title: '副本数', dataIndex: 'replicaCount', key: 'replicaCount', width: '8%' },
   { title: '创建时间', dataIndex: 'createTime', key: 'createTime', width: '13%' },
-  { title: '存储ID / 哈希', dataIndex: 'ids', key: 'ids', width: '16%' }
+  { title: '哈希', dataIndex: 'fileHash', key: 'fileHash', width: '18%' }
 ]
 
 /* ===================== 激活门控 ===================== */
@@ -167,12 +170,12 @@ watch(
 
     <a-card :bordered="false" style="margin-bottom: 16px">
       <a-form layout="inline">
-        <a-form-item label="文件名">
+        <a-form-item label="存储编号">
           <a-input
-            v-model:value="filters.keyword"
-            placeholder="关键字模糊匹配"
+            v-model:value="filters.storageId"
+            placeholder="storage_id 包含匹配"
             allow-clear
-            style="width: 200px"
+            style="width: 180px"
             @pressEnter="applyFilters"
           />
         </a-form-item>
@@ -227,9 +230,9 @@ watch(
         @change="onTableChange"
       >
         <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'filename'">
-            <a-typography-text :title="record.filename" style="max-width: 100%" ellipsis>
-              {{ record.filename }}
+          <template v-if="column.key === 'storageId'">
+            <a-typography-text :title="record.storageId" copyable style="font-size: 12px">
+              {{ record.storageId }}
             </a-typography-text>
           </template>
           <template v-else-if="column.key === 'fileType'">
@@ -265,17 +268,10 @@ watch(
           <template v-else-if="column.key === 'createTime'">
             {{ record.createTime ? new Date(record.createTime).toLocaleString() : '-' }}
           </template>
-          <template v-else-if="column.key === 'ids'">
-            <div>
-              <a-typography-text copyable style="font-size: 12px">
-                {{ record.storageId }}
-              </a-typography-text>
-            </div>
-            <div>
-              <a-typography-text copyable style="font-size: 12px; color: #999">
-                {{ record.fileHash }}
-              </a-typography-text>
-            </div>
+          <template v-else-if="column.key === 'fileHash'">
+            <a-typography-text :title="record.fileHash" copyable ellipsis style="font-size: 12px; color: #999">
+              {{ record.fileHash }}
+            </a-typography-text>
           </template>
         </template>
       </a-table>

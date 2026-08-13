@@ -120,21 +120,37 @@ class FileMetadataDaoTest {
     }
 
     @Test
-    void keywordFilterEscapesWildcards() throws Exception {
-        // 文件名含 LIKE 通配字符的行：只有转义后精确匹配才算命中
+    void storageIdFilterEscapesWildcards() throws Exception {
+        // storage_id 含 LIKE 通配字符：只有转义后按字面匹配才算命中
         try (Connection conn = dataSource.getConnection(); Statement stmt = conn.createStatement()) {
             stmt.execute("INSERT INTO file_metadata (storage_id, filename, file_hash) "
-                    + "VALUES ('s4', '100%_notes.txt', 'h4')");
+                    + "VALUES ('100%_notes', 'note.txt', 'h4')");
         }
         FileMetadataDao.Page hit = dao.queryFiles(
                 new FileMetadataDao.Filter(null, null, null, "100%_notes"), 1, 20);
         assertEquals(1, hit.total, "转义后的通配符应按字面匹配");
-        assertEquals("100%_notes.txt", hit.rows.get(0).filename);
+        assertEquals("100%_notes", hit.rows.get(0).storageId);
 
         // 下划线必须按字面处理：若未转义，LIKE 会把 _ 当单字符通配而误命中
         FileMetadataDao.Page miss = dao.queryFiles(
                 new FileMetadataDao.Filter(null, null, null, "notes_txt"), 1, 20);
         assertEquals(0, miss.total, "下划线转义后不应作为通配符命中");
+    }
+
+    @Test
+    void unknownTypeFilterMatchesStoredAndNull() throws Exception {
+        // s2 无 file_type（NULL）；插入一行显式 'unknown' 存值
+        try (Connection conn = dataSource.getConnection(); Statement stmt = conn.createStatement()) {
+            stmt.execute("INSERT INTO file_metadata (storage_id, filename, file_hash, file_type) "
+                    + "VALUES ('s4', 'noext', 'h4', 'unknown')");
+        }
+        FileMetadataDao.Page page = dao.queryFiles(
+                new FileMetadataDao.Filter(null, null, "unknown", null), 1, 20);
+        assertEquals(2, page.total, "unknown 应匹配存值 'unknown' 行 + NULL 类型行（两者展示均为未知）");
+        // 已识别类型的行不应被 unknown 命中
+        FileMetadataDao.Page notPdf = dao.queryFiles(
+                new FileMetadataDao.Filter(null, null, "unknown", null), 1, 20);
+        assertEquals(2, notPdf.total);
     }
 
     @Test
