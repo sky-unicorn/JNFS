@@ -40,10 +40,12 @@
             <artifactId>logback-classic</artifactId>
         </dependency>
         <!-- 测试：FileMetadataDao 单测用内存 H2 验证两方言通用 SQL 与 NULL 语义 -->
+        <!-- 注意：h2 必须是 compile/runtime 作用域。Registry 在 h2 模式下运行时需要
+             H2 驱动（DriverManager 按 jdbc:h2 URL 加载），若声明为 test 会遮蔽 jnfs-common
+             传递引入的 compile 作用域 h2，导致运行时 "No suitable driver"。 -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
-            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
