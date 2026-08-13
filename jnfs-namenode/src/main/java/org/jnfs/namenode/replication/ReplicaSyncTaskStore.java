@@ -28,7 +28,7 @@ import java.util.List;
  *   <li>{@link #markDone}：→DONE</li>
  *   <li>{@link #markFailed}：回 PENDING 且 retry_count++（原子 UPDATE）</li>
  * </ul>
- * file 模式不构造本类（单副本无对账需求）。
+ * file 模式已退役；JDBC 模式（mysql 集群 / h2 同机多磁盘）均构造本类。
  */
 public class ReplicaSyncTaskStore {
 
@@ -188,14 +188,19 @@ public class ReplicaSyncTaskStore {
      * @return stale IN_FLIGHT 任务列表
      */
     public List<ReplicaSyncTask> findStaleInFlight(int minutes) throws SQLException {
+        // 截止时间在应用侧计算：mysql 的 NOW() - INTERVAL ? MINUTE 在 H2 MariaDB 模式下不支持
+        // （H2DialectProbeTest 探针 i 验证抛 42001）。参数化 Timestamp 零方言；
+        // 30min 阈值 + 20min 余量下，应用时钟与 DB 时钟秒级偏差可忽略（H2 嵌入式与 JVM 同进程，0 偏差）。
+        java.sql.Timestamp cutoff = new java.sql.Timestamp(
+                System.currentTimeMillis() - minutes * 60_000L);
         String sql = "SELECT task_id, file_hash, source_node, target_node, status, retry_count, file_size," +
                 " create_time, update_time FROM replica_sync_task" +
-                " WHERE status = ? AND update_time < NOW() - INTERVAL ? MINUTE";
+                " WHERE status = ? AND update_time < ?";
         List<ReplicaSyncTask> result = new ArrayList<>();
         try (Connection conn = dataSource.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
             stmt.setInt(1, SyncTaskStatus.IN_FLIGHT.getCode());
-            stmt.setInt(2, minutes);
+            stmt.setTimestamp(2, cutoff);
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     result.add(mapRow(rs));

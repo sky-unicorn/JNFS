@@ -9,11 +9,11 @@ server:
 # --- 统一存储配置 ---
 # mode 同时决定两件事，避免存储模式与数据库连接信息在多处重复耦合：
 #   - Dashboard 鉴权用户存储后端：h2=本地文件（FileUserStore），mysql=dashboard_user 表
-#   - 冗余存储管理 API 是否启用：h2=单机无冗余，mysql=连元数据库读写冗余组/策略/任务表
+#   - 冗余存储管理 API：h2/mysql 均启用（h2 仅限同机多磁盘，无跨机物理隔离；mysql 跨机）
 storage:
   # 存储模式：h2 | mysql
-  # h2    = 嵌入式 H2 文件库（单机零依赖，鉴权走本地文件，无冗余 API）
-  # mysql = 连接 MySQL（鉴权与冗余 API 共享 DataSource，需配置下方 mysql 段）
+  # h2    = 嵌入式 H2 文件库（单机零依赖，鉴权走本地文件，冗余 API 支持 同机多磁盘 多副本）
+  # mysql = 连接 MySQL（鉴权与冗余 API 共享 DataSource，跨机多副本，需配置下方 mysql 段）
   # 注：旧版本 file 模式已退役；若仍配 mode: file，启动时自动映射为 h2
   mode: h2
 

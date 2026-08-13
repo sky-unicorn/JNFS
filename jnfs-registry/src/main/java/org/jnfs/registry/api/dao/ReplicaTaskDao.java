@@ -45,7 +45,7 @@ public class ReplicaTaskDao {
     public Summary summary() throws SQLException {
         String sql = "SELECT" +
                 " SUM(CASE WHEN status IN (0,1) THEN 1 ELSE 0 END) AS total_pending," +
-                " SUM(CASE WHEN status = 2 AND update_time >= CURDATE() THEN 1 ELSE 0 END) AS synced_today," +
+                " SUM(CASE WHEN status = 2 AND update_time >= CURRENT_DATE THEN 1 ELSE 0 END) AS synced_today," +
                 " SUM(CASE WHEN retry_count >= ? THEN 1 ELSE 0 END) AS failed," +
                 " SUM(CASE WHEN status = 1 THEN 1 ELSE 0 END) AS current_jobs" +
                 " FROM replica_sync_task";

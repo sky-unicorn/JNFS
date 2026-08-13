@@ -19,13 +19,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 冗余组配置缓存（mysql 模式专用）。
+ * 冗余组配置缓存（JDBC 模式 mysql/h2 共用）。
  * <p>
- * 设计文档 §9.3：冗余组配置持久化到 mysql {@code replication_group} 表，不依赖 Registry 内存。
+ * 设计文档 §9.3：冗余组配置持久化到 {@code replication_group} 表，不依赖 Registry 内存。
  * NameNode 启动时同步加载一次，并通过后台守护线程定期 refresh（默认 30s），保证 Dashboard 改组后 NameNode 能感知。
  * <p>
  * 线程安全：groups 字段 volatile，refresh 整体替换引用；读取方拿快照。
- * file 模式不构造本类（{@code replicationGroupStore == null} 即短路单副本）。
+ * file 模式已退役；未构造本类（{@code replicationGroupStore == null}）即降级单副本。
  */
 public class ReplicationGroupStore {
 

@@ -152,7 +152,8 @@ class H2MigrationChainTest {
         assertEquals(2, countRows("file_metadata"), "重跑后 file_metadata 行数不应变化");
         assertEquals(3, countRows("file_location"), "重跑后 file_location 行数不应变化");
 
-        // 单副本语义：file_metadata.replication_factor 均为默认 1
+        // legacy file 导入数据为单副本：file_metadata.replication_factor 均为默认 1
+        // （用户可在 Dashboard 配置冗余组后，新上传文件按组大小多副本）
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(
                      "SELECT storage_id, filename, file_hash, replication_factor FROM file_metadata ORDER BY storage_id")) {
@@ -162,7 +163,7 @@ class H2MigrationChainTest {
                 while (rs.next()) {
                     rows++;
                     assertEquals(1, rs.getInt("replication_factor"),
-                            "H2 单副本语义：replication_factor 应为 1");
+                            "legacy file 导入数据为单副本：replication_factor 应为 1");
                 }
                 assertEquals(2, rows, "file_metadata 应有 2 行");
             }

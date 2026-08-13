@@ -85,10 +85,10 @@ public class NameNodeServer {
     private final ScheduledExecutorService heartbeatScheduler;
     private final ScheduledExecutorService discoveryScheduler;
 
-    // 冗余组配置缓存（mysql 模式专用，file 模式为 null）
+    // 冗余组配置缓存（JDBC 模式 mysql/h2 构造；未配置时 null → 单副本降级）
     private final ReplicationGroupStore replicationGroupStore;
 
-    // 夜间对账同步调度器（mysql 模式专用，file 模式为 null）
+    // 夜间对账同步调度器（JDBC 模式 mysql/h2 构造；未配置时 null → 对账短路）
     private final org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler;
 
     // 元数据管理器（用于 shutdown 时关闭 DataSource）
@@ -316,10 +316,10 @@ public class NameNodeServer {
         // --- 初始化 MetadataManager ---
         MetadataManager metadataManager = null;
 
-        // 冗余组配置缓存（mysql 模式构造，file 模式保持 null）
+        // 冗余组配置缓存（mysql/h2 分支构造；未配置时 null → 单副本降级）
         ReplicationGroupStore replicationGroupStore = null;
 
-        // 对账同步调度器（mysql 模式构造，file 模式保持 null）
+        // 对账同步调度器（mysql/h2 分支构造；未配置时 null → 对账短路）
         org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler = null;
 
         // 缓存配置默认值
@@ -491,7 +491,22 @@ public class NameNodeServer {
             }
 
             // 不删 namenode_meta.log：作为回滚安全网 + FileToH2Importer 导入源，保留原始文件
-            // 冗余组件（ReplicationGroupStore / ReplicaSyncScheduler）保持 null：H2 单副本短路
+
+            // 冗余组件（与 mysql 分支对齐：H2 同机多磁盘多副本；未配置冗余组时 selectReplicaTargets
+            // 自动降级单副本，与旧行为一致）。H2 迁移链已建齐全部冗余表（MysqlV1ToV2/V2ToV3/V3ToV4 声明 supports H2）。
+            replicationGroupStore = new ReplicationGroupStore(metadataManager.getDataSource());
+            replicationGroupStore.start();
+            LOG.info("冗余组配置缓存已启动（h2 模式，多副本可用）");
+
+            io.netty.channel.EventLoopGroup syncWorkerGroup = new io.netty.channel.nio.NioEventLoopGroup();
+            replicaSyncScheduler = new org.jnfs.namenode.replication.ReplicaSyncScheduler(
+                    metadataManager.getDataSource(),
+                    replicationGroupStore,
+                    advertisedHost, port,
+                    syncWorkerGroup,
+                    null);   // 默认策略
+            replicaSyncScheduler.start();
+            LOG.info("对账同步调度器已启动（h2 模式）");
         }
 
         // --- 初始化 MetadataCacheManager ---

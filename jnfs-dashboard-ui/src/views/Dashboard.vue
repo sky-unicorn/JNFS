@@ -8,7 +8,6 @@ import {
 } from '@ant-design/icons-vue'
 import {
   authEnabled,
-  noRedundancy,
   storageMode,
   apiGet
 } from '../api/client'
@@ -124,13 +123,21 @@ function onMenuClick({ key }) {
       </a-layout-sider>
 
       <a-layout-content style="padding: 24px; background: #f4f7f6;">
-        <!-- 单机嵌入式（file/h2）模式：无冗余提示 -->
+        <!-- file 模式（已退役，防御性）：冗余不可用 -->
         <a-alert
-          v-if="isRedundancy && noRedundancy"
+          v-if="isRedundancy && storageMode === 'file'"
+          type="warning"
+          show-icon
+          style="margin-bottom: 12px"
+          message="单机 file 模式·无冗余：当前为单副本存储，冗余存储管理不可用（冗余 API 返回 503）。"
+        />
+        <!-- h2 模式：同机部署提示（副本在同机不同磁盘，无跨机物理隔离） -->
+        <a-alert
+          v-if="isRedundancy && storageMode === 'h2'"
           type="info"
           show-icon
           style="margin-bottom: 12px"
-          :message="`单机嵌入式·无冗余：当前 ${storageMode.toUpperCase()} 模式为单副本存储，冗余存储管理不可用（冗余 API 返回 503）。`"
+          message="H2 单机模式：副本建议部署在同一台机器的不同磁盘上；本模式不提供跨机器物理隔离，请确保磁盘独立可用。"
         />
 
         <NodesView
