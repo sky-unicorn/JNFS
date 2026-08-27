@@ -116,21 +116,24 @@ public class MetadataCacheManager {
      *
      * @param storageId         存储ID
      * @param replicationFactor 目标副本数（1=单副本，2/3=组内节点数），写入 file_metadata.replication_factor
+     * @param fileSize          文件大小（字节，NULL=未知），写入 file_metadata.file_size
+     * @param fileType          文件类型标签（扩展名识别，NULL=未知），写入 file_metadata.file_type
      * @param locations         全部副本位置（PRIMARY 恒在首位；file 模式为单元素列表）
      */
     public void put(String filename, String hash, String storageId,
-                    int replicationFactor, List<ReplicaLocation> locations) {
+                    int replicationFactor, Long fileSize, String fileType,
+                    List<ReplicaLocation> locations) {
         // 1. 先持久化
         // 目前仅实现同步写入 (Sync)，异步写入需引入队列和Worker
         try {
-            metadataManager.logAddFile(filename, hash, storageId, replicationFactor, locations);
+            metadataManager.logAddFile(filename, hash, storageId, replicationFactor, fileSize, fileType, locations);
         } catch (java.io.IOException e) {
             throw new RuntimeException("Metadata persistence failed", e);
         }
 
         // 2. 更新缓存
         if (enabled) {
-            MetadataEntry entry = new MetadataEntry(filename, hash, storageId, locations);
+            MetadataEntry entry = new MetadataEntry(filename, hash, storageId, fileSize, fileType, locations);
             metaCache.put(hash, entry);
             idToHashCache.put(storageId, hash);
         }
@@ -186,6 +189,10 @@ public class MetadataCacheManager {
         public final String filename;
         public final String hash;
         public final String storageId;
+        /** 文件大小（字节）；NULL=未知（旧数据/尚未回填） */
+        public final Long fileSize;
+        /** 文件类型标签；NULL=未知（无扩展名且尚未内容嗅探） */
+        public final String fileType;
         /** 全部副本位置（不可变，按 role ASC/status DESC 排序，PRIMARY+ACTIVE 恒在首位） */
         public final List<ReplicaLocation> locations;
 
@@ -194,9 +201,22 @@ public class MetadataCacheManager {
          *                  传 null 或空列表表示无副本（getPrimaryLocation 返回 null）。
          */
         public MetadataEntry(String filename, String hash, String storageId, List<ReplicaLocation> locations) {
+            this(filename, hash, storageId, null, null, locations);
+        }
+
+        /**
+         * 全量构造：额外携带 fileSize / fileType（可 null）。
+         *
+         * @param locations 全部副本位置；构造时会做防御性拷贝并按 role ASC/status DESC 排序。
+         *                  传 null 或空列表表示无副本（getPrimaryLocation 返回 null）。
+         */
+        public MetadataEntry(String filename, String hash, String storageId, Long fileSize,
+                             String fileType, List<ReplicaLocation> locations) {
             this.filename = filename;
             this.hash = hash;
             this.storageId = storageId;
+            this.fileSize = fileSize;
+            this.fileType = fileType;
             if (locations == null || locations.isEmpty()) {
                 this.locations = Collections.emptyList();
             } else {

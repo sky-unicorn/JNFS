@@ -396,7 +396,7 @@ public class JNFSDriver {
 
         if (existingAddr != null) {
             LOG.info("[Driver] 发现相同文件 (节点: {})，触发秒传...", existingAddr);
-            String storageId = commitFile(file.getName(), fileHash, List.of(existingAddr));
+            String storageId = commitFile(file.getName(), fileHash, List.of(existingAddr), file.length());
             LOG.info("[Driver] 秒传成功！存储编号: {}", storageId);
             return storageId;
         }
@@ -448,7 +448,7 @@ public class JNFSDriver {
             }
 
             // 部分成功即提交：COMMIT 只登记 succeeded（顺序 = targets 顺序，primary 恒首位）
-            String storageId = commitFile(file.getName(), fileHash, succeeded);
+            String storageId = commitFile(file.getName(), fileHash, succeeded, file.length());
             LOG.info("[Driver] 文件元数据提交完成，存储编号: {}，成功: {}/{}", storageId, succeeded.size(), targets.size());
 
             return storageId;
@@ -603,16 +603,17 @@ public class JNFSDriver {
     }
 
     /**
-     * 提交文件元数据（§15.3 破坏性变更：多地址）。
+     * 提交文件元数据（§15.3 破坏性变更：多地址 + 文件大小）。
      * <p>
-     * payload 格式：{@code filename|hash|addr1,addr2,...}（addr 用 `,` 连接，外层 `|`）。
-     * NameNode 将首个 addr 视为 PRIMARY，其余为 SECONDARY。
+     * payload 格式：{@code filename|hash|addr1,addr2,...|fileSize}（addr 用 `,` 连接，外层 `|`）。
+     * NameNode 将首个 addr 视为 PRIMARY，其余为 SECONDARY；
+     * fileSize 为原始明文大小（加密前 {@code file.length()}），供 Dashboard 展示文件大小。
      *
      * @param succeededAddrs 成功写入的节点地址列表（顺序 = targets 顺序，首个恒为 primary）
      */
-    private String commitFile(String filename, String hash, List<String> succeededAddrs) throws Exception {
+    private String commitFile(String filename, String hash, List<String> succeededAddrs, long fileSize) throws Exception {
         String addrList = String.join(",", succeededAddrs);
-        String payload = filename + "|" + hash + "|" + addrList;
+        String payload = filename + "|" + hash + "|" + addrList + "|" + fileSize;
         Packet response = sendRequestToNameNode(CommandType.NAMENODE_COMMIT_FILE, payload.getBytes(StandardCharsets.UTF_8));
 
         if (response.getCommandType() == CommandType.ERROR) {

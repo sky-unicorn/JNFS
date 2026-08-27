@@ -6,6 +6,7 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
+import org.jnfs.common.FileTypeDetector;
 import org.jnfs.common.NettyHandlerHelper;
 import org.jnfs.common.NodeAddressResolver;
 import org.jnfs.common.Packet;
@@ -426,10 +427,13 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
     /**
      * 处理文件提交（§6.3 + §15.3 破坏性变更）。
      * <p>
-     * 新格式：{@code filename|hash|addr1,addr2,addr3}（addr 用 {@code ,} 分隔，外层 {@code |}）。
+     * 新格式：{@code filename|hash|addr1,addr2,addr3|fileSize}（addr 用 {@code ,} 分隔，外层 {@code |}）。
      * <ul>
      *   <li>首个 addr = PRIMARY（role=0, status=ACTIVE），其余 = SECONDARY（role=1, status=ACTIVE）</li>
      *   <li>replicationFactor 按 primary 所在冗余组大小快照（§5.1 + M6）；无组/file 模式 = 1</li>
+     *   <li>第 4 段 fileSize（Driver 侧原始明文大小）可选：缺失/非法 → NULL（大小未知，
+     *       由后台 FileTypeDetectScheduler 读 DataNode 实际长度回填）</li>
+     *   <li>file_type 按文件名扩展名即时计算（{@link FileTypeDetector#fromFilename}，微秒级零开销）</li>
      * </ul>
      * 破坏性变更：去掉了 {@code parts.length != 3} 校验，改为 {@code parts.length >= 3 && parts[2] 非空}。
      */
@@ -446,6 +450,22 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
         // 解析成功的节点地址列表（addr 为 host:port，由 Driver 转换为 node_id 存储）
         // parts[2] 非空保证 addrs 至少含一个元素（",".split(",") 恒返回 ≥1 元素）
         String[] addrs = parts[2].split(",");
+
+        // 第 4 段 fileSize 可选（旧 Driver 协议缺省）：缺失/非法 → NULL（大小未知，后台回填）
+        Long fileSize = null;
+        if (parts.length >= 4 && parts[3] != null && !parts[3].isEmpty()) {
+            try {
+                fileSize = Long.parseLong(parts[3].trim());
+                if (fileSize < 0) {
+                    fileSize = null;
+                }
+            } catch (NumberFormatException e) {
+                LOG.warn("handleCommitFile: 非法的 fileSize 段，按未知处理: {}", parts[3]);
+            }
+        }
+
+        // 类型标签：按扩展名即时识别（纯字符串函数，不影响上传主链路）
+        String fileType = FileTypeDetector.fromFilename(filename);
 
         // 每个 addr → nodeId；构造 locations（首个=PRIMARY，其余=SECONDARY，全部 ACTIVE）
         List<ReplicaLocation> locations = new ArrayList<>(addrs.length);
@@ -501,7 +521,7 @@ public class NameNodeHandler extends SimpleChannelInboundHandler<Packet> {
             // 持久化到 MySQL 或 文件，并更新缓存（存储 node_id 而非 host:port）
             try {
                 if (cacheManager != null) {
-                    cacheManager.put(filename, hash, storageId, replicationFactor, locations);
+                    cacheManager.put(filename, hash, storageId, replicationFactor, fileSize, fileType, locations);
                 }
             } catch (Exception e) {
                 LOG.error("元数据提交失败: {}", filename, e);

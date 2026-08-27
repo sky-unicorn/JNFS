@@ -36,7 +36,8 @@ public class SecurityUtil {
     // HMAC-SHA256 输出长度 (256 位 = 32 字节)
     private static final int HMAC_LENGTH = 32;
     // 文件头总长度: version(1) + hmac(32) + iv(16) = 49 字节
-    private static final int HEADER_LENGTH = 1 + HMAC_LENGTH + IV_LENGTH;
+    // 公开供 DataNode 头部读取等场景计算密文文件逻辑长度（文件长度 - HEADER_LENGTH）
+    public static final int HEADER_LENGTH = 1 + HMAC_LENGTH + IV_LENGTH;
 
     // 旧版 ECB 密钥 (仅用于解密旧文件)
     private static final byte[] LEGACY_KEY = "jnfs-secret-key!".getBytes(StandardCharsets.UTF_8);
@@ -123,6 +124,35 @@ public class SecurityUtil {
             throw new IOException("HMAC 验证失败，数据可能被篡改或密钥不匹配");
         }
 
+        Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, aesKey, new IvParameterSpec(iv));
+        return cipher.doFinal(ciphertext);
+    }
+
+    /**
+     * 解密 v1 格式密文的前缀（不校验 HMAC，仅用于文件头嗅探等尽力而为场景）。
+     * <p>
+     * 入参为 v1 格式 {@code [version(0x01)][HMAC(32)][IV(16)][ciphertext]} 的任意前缀：
+     * 跳过 {@link #HEADER_LENGTH} 字节头后，用头内 IV 初始化 AES/CTR 解密剩余密文前缀。
+     * CTR 是流密码，前缀解密不需要完整密文；HMAC 覆盖全量数据，前缀无法校验，
+     * 因此解密结果仅可用于类型嗅探等非安全场景，不得作为可信数据。
+     *
+     * @param enc v1 格式密文前缀（至少含完整 header，否则返回空数组）
+     * @return 明文前缀；非 v1 格式（legacy ECB）或密文部分为空时返回空数组
+     */
+    public byte[] decryptHead(byte[] enc) throws Exception {
+        if (enc == null || enc.length <= HEADER_LENGTH) {
+            return new byte[0];
+        }
+        if (enc[0] != VERSION_CTR_HMAC) {
+            // 旧版 ECB 格式：块加密，前缀无法独立解密，尽力而为返回空
+            return new byte[0];
+        }
+        byte[] iv = Arrays.copyOfRange(enc, 1 + HMAC_LENGTH, HEADER_LENGTH);
+        byte[] ciphertext = Arrays.copyOfRange(enc, HEADER_LENGTH, enc.length);
+        if (ciphertext.length == 0) {
+            return new byte[0];
+        }
         Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
         cipher.init(Cipher.DECRYPT_MODE, aesKey, new IvParameterSpec(iv));
         return cipher.doFinal(ciphertext);

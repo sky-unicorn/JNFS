@@ -89,4 +89,38 @@ public final class JsonHttpUtils {
         int idx = path.lastIndexOf('/');
         return idx >= 0 ? path.substring(idx + 1) : path;
     }
+
+    /**
+     * 解析查询串为 Map（重复参数取首个值；值做 URL 解码，null/空串归一为 null）。
+     * 供分页/筛选类 GET 端点使用（com.sun.net.httpserver 无内建参数解析）。
+     */
+    public static java.util.Map<String, String> parseQuery(HttpExchange exchange) {
+        java.util.Map<String, String> result = new java.util.HashMap<>();
+        String raw = exchange.getRequestURI().getRawQuery();
+        if (raw == null || raw.isEmpty()) {
+            return result;
+        }
+        for (String pair : raw.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq < 0) {
+                result.putIfAbsent(dec(pair), null);
+                continue;
+            }
+            String key = dec(pair.substring(0, eq));
+            String value = eq == pair.length() - 1 ? null : dec(pair.substring(eq + 1));
+            if (value != null && value.isEmpty()) {
+                value = null;
+            }
+            result.putIfAbsent(key, value);
+        }
+        return result;
+    }
+
+    private static String dec(String s) {
+        try {
+            return java.net.URLDecoder.decode(s, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return s;
+        }
+    }
 }

@@ -4,7 +4,8 @@ import {
   KeyOutlined,
   LogoutOutlined,
   DesktopOutlined,
-  ClusterOutlined
+  ClusterOutlined,
+  FileTextOutlined
 } from '@ant-design/icons-vue'
 import {
   authEnabled,
@@ -12,12 +13,13 @@ import {
   apiGet
 } from '../api/client'
 import NodesView from './NodesView.vue'
+import FilesView from './FilesView.vue'
 import GroupsView from './redundancy/GroupsView.vue'
 import SyncView from './redundancy/SyncView.vue'
 import AlertsView from './redundancy/AlertsView.vue'
 import ChangePasswordModal from '../components/ChangePasswordModal.vue'
 
-// 单一激活键：'nodes' | 'redundancy/groups' | 'redundancy/sync' | 'redundancy/alerts'
+// 单一激活键：'nodes' | 'files' | 'redundancy/groups' | 'redundancy/sync' | 'redundancy/alerts'
 const activeKey = ref('nodes')
 // 左侧菜单展开态（冗余存储管理子菜单默认展开）
 const openKeys = ref(['redundancy'])
@@ -60,6 +62,7 @@ watch(nodesActive, a => {
 }, { immediate: true })
 
 // 子页激活态（active 门控，切菜单即重启轮询）
+const filesActive = computed(() => activeKey.value === 'files')
 const groupsActive = computed(() => activeKey.value === 'redundancy/groups')
 const syncActive = computed(() => activeKey.value === 'redundancy/sync')
 const alertsActive = computed(() => activeKey.value === 'redundancy/alerts')
@@ -101,6 +104,11 @@ function onMenuClick({ key }) {
           <a-menu-item key="nodes">
             <template #icon><DesktopOutlined /></template>
             节点监控
+          </a-menu-item>
+
+          <a-menu-item key="files">
+            <template #icon><FileTextOutlined /></template>
+            文件管理
           </a-menu-item>
 
           <a-sub-menu key="redundancy">
@@ -146,6 +154,8 @@ function onMenuClick({ key }) {
           :groups="groups"
           @update:nodes="nodes = $event"
         />
+
+        <FilesView v-else-if="activeKey === 'files'" :active="filesActive" />
 
         <GroupsView
           v-else-if="activeKey === 'redundancy/groups'"

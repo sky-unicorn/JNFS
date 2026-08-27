@@ -85,13 +85,14 @@ public abstract class JdbcMetadataManager extends MetadataManager {
      */
     public static List<String> anchorTableDdl() {
         return List.of(
-                // file_metadata（含 V2 新增 replication_factor 列）
+                // file_metadata（含 V2 新增 replication_factor 列、V7 新增 file_type 列）
                 "CREATE TABLE IF NOT EXISTS `file_metadata` ("
                         + "`storage_id` CHAR(36) NOT NULL COMMENT '存储ID (UUID), 主键', "
                         + "`filename` VARCHAR(255) NOT NULL COMMENT '原始文件名', "
                         + "`file_hash` CHAR(64) NOT NULL COMMENT '文件哈希 (SHA-256)', "
-                        + "`file_size` BIGINT DEFAULT 0 COMMENT '文件大小 (字节)', "
+                        + "`file_size` BIGINT DEFAULT NULL COMMENT '文件大小 (字节, NULL=未知)', "
                         + "`replication_factor` TINYINT NOT NULL DEFAULT 1 COMMENT '目标副本数；1=单副本，2/3=组内节点数', "
+                        + "`file_type` VARCHAR(32) DEFAULT NULL COMMENT '文件类型标签(扩展名识别/Tika内容嗅探), NULL=未知', "
                         + "`create_time` DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间', "
                         + "`update_time` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
                         + "PRIMARY KEY (`storage_id`), "
@@ -152,7 +153,7 @@ public abstract class JdbcMetadataManager extends MetadataManager {
      */
     @Override
     public MetadataCacheManager.MetadataEntry queryByHash(String hash) {
-        String sql = "SELECT m.filename, m.file_hash, m.storage_id, " +
+        String sql = "SELECT m.filename, m.file_hash, m.storage_id, m.file_size, m.file_type, " +
                      "COALESCE(l.datanode_id, l.datanode_addr) AS node_id, " +
                      "l.replica_role, l.status " +
                      "FROM file_metadata m " +
@@ -167,6 +168,8 @@ public abstract class JdbcMetadataManager extends MetadataManager {
                 String filename = null;
                 String fileHash = null;
                 String storageId = null;
+                Long fileSize = null;
+                String fileType = null;
                 List<ReplicaLocation> locations = new ArrayList<>();
 
                 while (rs.next()) {
@@ -175,6 +178,9 @@ public abstract class JdbcMetadataManager extends MetadataManager {
                         filename = rs.getString("filename");
                         fileHash = rs.getString("file_hash");
                         storageId = rs.getString("storage_id");
+                        long size = rs.getLong("file_size");
+                        fileSize = rs.wasNull() ? null : size;
+                        fileType = rs.getString("file_type");
                     }
                     locations.add(new ReplicaLocation(
                             rs.getString("node_id"),
@@ -185,7 +191,7 @@ public abstract class JdbcMetadataManager extends MetadataManager {
 
                 if (filename != null) {
                     return new MetadataCacheManager.MetadataEntry(
-                            filename, fileHash, storageId, locations);
+                            filename, fileHash, storageId, fileSize, fileType, locations);
                 }
             }
         } catch (SQLException e) {
@@ -312,17 +318,29 @@ public abstract class JdbcMetadataManager extends MetadataManager {
      */
     @Override
     public void logAddFile(String filename, String hash, String storageId,
-                           int replicationFactor, List<ReplicaLocation> locations) throws IOException {
+                           int replicationFactor, Long fileSize, String fileType,
+                           List<ReplicaLocation> locations) throws IOException {
         try (Connection conn = dataSource.getConnection()) {
             conn.setAutoCommit(false);
             try {
-                // 1. 插入 metadata（含 replication_factor）
-                String sqlMeta = "INSERT INTO file_metadata (storage_id, filename, file_hash, replication_factor) VALUES (?, ?, ?, ?)";
+                // 1. 插入 metadata（含 replication_factor / file_size / file_type 列）
+                String sqlMeta = "INSERT INTO file_metadata (storage_id, filename, file_hash, "
+                        + "file_size, file_type, replication_factor) VALUES (?, ?, ?, ?, ?, ?)";
                 try (PreparedStatement stmt = conn.prepareStatement(sqlMeta)) {
                     stmt.setString(1, storageId);
                     stmt.setString(2, filename);
                     stmt.setString(3, hash);
-                    stmt.setInt(4, replicationFactor);
+                    if (fileSize == null) {
+                        stmt.setNull(4, java.sql.Types.BIGINT);
+                    } else {
+                        stmt.setLong(4, fileSize);
+                    }
+                    if (fileType == null) {
+                        stmt.setNull(5, java.sql.Types.VARCHAR);
+                    } else {
+                        stmt.setString(5, fileType);
+                    }
+                    stmt.setInt(6, replicationFactor);
                     stmt.executeUpdate();
                 }
 

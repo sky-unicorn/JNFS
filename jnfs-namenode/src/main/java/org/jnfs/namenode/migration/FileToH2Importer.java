@@ -1,5 +1,6 @@
 package org.jnfs.namenode.migration;
 
+import org.jnfs.common.FileTypeDetector;
 import org.jnfs.common.NodeAddressResolver;
 import org.jnfs.common.migration.JdbcDialect;
 import org.jnfs.common.migration.StorageMode;
@@ -135,16 +136,20 @@ public final class FileToH2Importer {
     /**
      * file_metadata 以 storage_id 为主键插入，INSERT IGNORE 天然去重。
      * replication_factor 不显式指定，走表默认值 1（H2 单副本语义，与 file 单副本一致）。
+     * file_size 显式置 NULL（大小未知，由后台 FileTypeDetectScheduler 读 DataNode 实际长度回填）；
+     * file_type 按扩展名即时计算（与 JdbcV6ToV7 回填语义一致）。
      *
      * @return 实际新增行数（0 表示已存在被跳过）
      */
     private static int insertMetadataIgnore(Connection conn, String storageId, String filename, String hash)
             throws SQLException {
         try (PreparedStatement stmt = conn.prepareStatement(
-                "INSERT IGNORE INTO file_metadata (storage_id, filename, file_hash) VALUES (?, ?, ?)")) {
+                "INSERT IGNORE INTO file_metadata (storage_id, filename, file_hash, file_size, file_type) "
+                        + "VALUES (?, ?, ?, NULL, ?)")) {
             stmt.setString(1, storageId);
             stmt.setString(2, filename);
             stmt.setString(3, hash);
+            setNullableString(stmt, 4, FileTypeDetector.fromFilename(filename));
             return stmt.executeUpdate();
         }
     }

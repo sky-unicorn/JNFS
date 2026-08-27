@@ -102,18 +102,21 @@ class H2MetadataManagerTest {
     void logAddFileWritesMetadataAndLocation() throws Exception {
         List<ReplicaLocation> locs = Collections.singletonList(
                 new ReplicaLocation("node-1", ReplicaRole.PRIMARY.getCode(), ReplicaStatus.ACTIVE.getCode()));
-        manager.logAddFile("test.txt", "hash-abc", "storage-001", 1, locs);
+        manager.logAddFile("test.txt", "hash-abc", "storage-001", 1, 1024L, "txt", locs);
 
         // 验证 file_metadata
         try (Connection conn = dataSource.getConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(
-                     "SELECT filename, file_hash, storage_id, replication_factor FROM file_metadata WHERE storage_id='storage-001'")) {
+                     "SELECT filename, file_hash, storage_id, replication_factor, file_size, file_type "
+                             + "FROM file_metadata WHERE storage_id='storage-001'")) {
             assertTrue(rs.next(), "file_metadata 应有 1 行");
             assertEquals("test.txt", rs.getString("filename"));
             assertEquals("hash-abc", rs.getString("file_hash"));
             assertEquals("storage-001", rs.getString("storage_id"));
             assertEquals(1, rs.getInt("replication_factor"));
+            assertEquals(1024L, rs.getLong("file_size"), "file_size 应写入真实大小");
+            assertEquals("txt", rs.getString("file_type"), "file_type 应写入扩展名推导标签");
         }
 
         // 验证 file_location
@@ -130,15 +133,34 @@ class H2MetadataManagerTest {
     }
 
     @Test
+    void logAddFileWithNullSizeAndTypeWritesNulls() throws Exception {
+        List<ReplicaLocation> locs = Collections.singletonList(
+                new ReplicaLocation("node-1", ReplicaRole.PRIMARY.getCode(), ReplicaStatus.ACTIVE.getCode()));
+        // fileSize/fileType 可空（旧协议/无扩展名场景）
+        manager.logAddFile("noext", "hash-null", "storage-null", 1, null, null, locs);
+
+        try (Connection conn = dataSource.getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(
+                     "SELECT file_size, file_type FROM file_metadata WHERE storage_id='storage-null'")) {
+            assertTrue(rs.next(), "file_metadata 应有 1 行");
+            long size = rs.getLong("file_size");
+            assertTrue(rs.wasNull(), "file_size 传 null 时应落 NULL（大小未知）");
+            assertTrue(size == 0, "wasNull 成立时取值为 0（防御断言）");
+            assertNull(rs.getString("file_type"), "file_type 传 null 时应落 NULL");
+        }
+    }
+
+    @Test
     void logAddFileWithDuplicateStorageIdIsRejected() throws Exception {
         List<ReplicaLocation> locs = Collections.singletonList(
                 new ReplicaLocation("node-1", ReplicaRole.PRIMARY.getCode(), ReplicaStatus.ACTIVE.getCode()));
         // 首次写入
-        manager.logAddFile("dup.txt", "hash-dup", "storage-dup", 1, locs);
+        manager.logAddFile("dup.txt", "hash-dup", "storage-dup", 1, 10L, "txt", locs);
         // 重复 storage_id：file_metadata 主键冲突（storage_id 为 PRIMARY KEY）
         // logAddFile 仅对 file_location 用 INSERT IGNORE；file_metadata 重复 storage_id 会拒绝写入
         assertThrows(IOException.class, () ->
-                manager.logAddFile("dup2.txt", "hash-dup2", "storage-dup", 1, locs),
+                manager.logAddFile("dup2.txt", "hash-dup2", "storage-dup", 1, 10L, "txt", locs),
                 "重复 storage_id 的 INSERT 应抛 IOException（包装自 SQLException 主键冲突）");
 
         // 验证 file_metadata 只有一行（事务回滚，无半写状态）
@@ -177,8 +199,8 @@ class H2MetadataManagerTest {
         // 插入测试数据
         try (Connection conn = dataSource.getConnection()) {
             conn.createStatement().executeUpdate(
-                    "INSERT INTO file_metadata (storage_id, filename, file_hash, replication_factor) " +
-                    "VALUES ('storage-q', 'real-file.txt', 'hash-q', 1)");
+                    "INSERT INTO file_metadata (storage_id, filename, file_hash, replication_factor, file_size, file_type) " +
+                    "VALUES ('storage-q', 'real-file.txt', 'hash-q', 1, 2048, 'txt')");
             conn.createStatement().executeUpdate(
                     "INSERT INTO file_location (file_hash, datanode_id, datanode_addr, status, replica_role) " +
                     "VALUES ('hash-q', 'node-q', '10.0.0.1:9000', 1, 0)");
@@ -189,6 +211,8 @@ class H2MetadataManagerTest {
         assertEquals("real-file.txt", entry.filename, "filename 应为真实文件名，而非 'loaded_from_file'");
         assertEquals("hash-q", entry.hash);
         assertEquals("storage-q", entry.storageId);
+        assertEquals(2048L, entry.fileSize, "queryByHash 应携带 file_size");
+        assertEquals("txt", entry.fileType, "queryByHash 应携带 file_type");
         assertEquals(1, entry.locations.size());
         assertEquals("node-q", entry.getPrimaryNodeId());
         assertEquals(ReplicaRole.PRIMARY.getCode(), entry.getPrimaryLocation().getRole());

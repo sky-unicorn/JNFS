@@ -81,6 +81,12 @@ public enum CommandType {
     /** Registry -> NameNode: 响应存储配置（密文，AES-256-CTR + HMAC） */
     REGISTRY_RESPONSE_STORAGE_CONFIG((byte) 46),
 
+    // --- 文件头读取相关指令（后台文件类型嗅探用，不影响上传/下载主链路） ---
+    /** 文件头读取请求 (NameNode -> DataNode: 读文件解密后头部, 用于类型嗅探) */
+    DATA_HEAD_READ_REQUEST((byte) 47),
+    /** 文件头读取响应 (DataNode -> NameNode: [8B逻辑长度][明文头部≤8KB]) */
+    DATA_HEAD_READ_RESPONSE((byte) 48),
+
     /** 错误消息 */
     ERROR((byte) -1);
 

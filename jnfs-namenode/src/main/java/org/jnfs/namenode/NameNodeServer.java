@@ -91,12 +91,16 @@ public class NameNodeServer {
     // 夜间对账同步调度器（JDBC 模式 mysql/h2 构造；未配置时 null → 对账短路）
     private final org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler;
 
+    // 后台文件类型嗅探/大小回填调度器（JDBC 模式 mysql/h2 构造；与上传下载主链路无关）
+    private final FileTypeDetectScheduler fileTypeDetectScheduler;
+
     // 元数据管理器（用于 shutdown 时关闭 DataSource）
     private final MetadataManager metadataManager;
 
     public NameNodeServer(int port, String advertisedHost, String nodeId, List<InetSocketAddress> registryAddresses,
                           ReplicationGroupStore replicationGroupStore,
                           org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler,
+                          FileTypeDetectScheduler fileTypeDetectScheduler,
                           MetadataManager metadataManager) {
         this.port = port;
         this.advertisedHost = advertisedHost;
@@ -104,6 +108,7 @@ public class NameNodeServer {
         this.registryAddresses = registryAddresses;
         this.replicationGroupStore = replicationGroupStore;
         this.replicaSyncScheduler = replicaSyncScheduler;
+        this.fileTypeDetectScheduler = fileTypeDetectScheduler;
         this.metadataManager = metadataManager;
 
         // 初始化共享的 Worker Group
@@ -172,6 +177,14 @@ public class NameNodeServer {
                 replicationGroupStore.shutdown();
             } catch (Exception e) {
                 LOG.warn("关闭 ReplicationGroupStore 失败", e);
+            }
+        }
+        // 关闭后台文件类型嗅探调度器（先于元数据 DataSource 关闭，其内部 workerGroup 一并释放）
+        if (fileTypeDetectScheduler != null) {
+            try {
+                fileTypeDetectScheduler.shutdown();
+            } catch (Exception e) {
+                LOG.warn("关闭 FileTypeDetectScheduler 失败", e);
             }
         }
         // 关闭 JDBC 元数据 DataSource（mysql/H2 共享池；H2 AUTO_SERVER 混合模式下本进程连接须在
@@ -322,6 +335,9 @@ public class NameNodeServer {
         // 对账同步调度器（mysql/h2 分支构造；未配置时 null → 对账短路）
         org.jnfs.namenode.replication.ReplicaSyncScheduler replicaSyncScheduler = null;
 
+        // 后台文件类型嗅探/大小回填调度器（mysql/h2 分支构造）
+        FileTypeDetectScheduler fileTypeDetectScheduler = null;
+
         // 缓存配置默认值
         boolean cacheEnabled = true;
         long cacheMaxSize = 100000L;
@@ -427,6 +443,12 @@ public class NameNodeServer {
                     null);   // 默认策略
             replicaSyncScheduler.start();
             LOG.info("对账同步调度器已启动（mysql 模式）");
+
+            // 后台文件类型嗅探调度器（独立 workerGroup，兜底 file_type/file_size，不碰上传下载链路）
+            io.netty.channel.EventLoopGroup fileTypeGroup = new io.netty.channel.nio.NioEventLoopGroup();
+            fileTypeDetectScheduler = new FileTypeDetectScheduler(metadataManager.getDataSource(), fileTypeGroup);
+            fileTypeDetectScheduler.start();
+            LOG.info("文件类型嗅探调度器已启动（mysql 模式）");
         } else {
             // --- H2 嵌入式文件库分支（file 模式退役，旧 file 配置经 StorageMode.fromConfig 落到 H2） ---
             LOG.info("使用 H2 嵌入式文件库元数据存储（file 模式已退役）");
@@ -507,6 +529,12 @@ public class NameNodeServer {
                     null);   // 默认策略
             replicaSyncScheduler.start();
             LOG.info("对账同步调度器已启动（h2 模式）");
+
+            // 后台文件类型嗅探调度器（独立 workerGroup，兜底 file_type/file_size，不碰上传下载链路）
+            io.netty.channel.EventLoopGroup fileTypeGroup = new io.netty.channel.nio.NioEventLoopGroup();
+            fileTypeDetectScheduler = new FileTypeDetectScheduler(metadataManager.getDataSource(), fileTypeGroup);
+            fileTypeDetectScheduler.start();
+            LOG.info("文件类型嗅探调度器已启动（h2 模式）");
         }
 
         // --- 初始化 MetadataCacheManager ---
@@ -535,7 +563,7 @@ public class NameNodeServer {
         }
 
         new NameNodeServer(port, advertisedHost, nodeId, registryAddresses,
-                replicationGroupStore, replicaSyncScheduler, metadataManager).run();
+                replicationGroupStore, replicaSyncScheduler, fileTypeDetectScheduler, metadataManager).run();
     }
 
     /**

@@ -8,6 +8,8 @@ import io.netty.channel.SimpleChannelInboundHandler;
 import org.jnfs.common.CommandType;
 import org.jnfs.common.NettyHandlerHelper;
 import org.jnfs.common.Packet;
+import org.jnfs.common.SecurityConfig;
+import org.jnfs.common.SecurityUtil;
 import org.jnfs.common.SegmentedLocks;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -111,6 +113,9 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
         } else if (packet.getCommandType() == CommandType.DATA_REPLICA_PULL_CMD) {
             // 目标侧：NameNode 协调本节点开始拉取（步骤 1-2）
             handleReplicaPullCmd(ctx, packet);
+        } else if (packet.getCommandType() == CommandType.DATA_HEAD_READ_REQUEST) {
+            // 文件头读取：NameNode 后台类型嗅探用（读解密后的头部 ≤8KB，不碰下载主链路）
+            handleHeadRead(ctx, packet);
         }
     }
 
@@ -261,6 +266,76 @@ public class DataNodeHandler extends SimpleChannelInboundHandler<Object> {
 
         DefaultFileRegion region = new DefaultFileRegion(file, 0, fileLength);
         ctx.writeAndFlush(region);
+    }
+
+    // ==================== 文件头读取（后台类型嗅探） ====================
+
+    /** 头部嗅探最多返回的明文字节数（8KB，Tika 检测足够） */
+    private static final int HEAD_READ_MAX_PLAIN_BYTES = 8192;
+
+    /**
+     * 处理 DATA_HEAD_READ_REQUEST：读文件解密后的头部（≤8KB）供 NameNode 后台类型嗅探。
+     * <p>
+     * 存储文件为 v1 密文格式 {@code [version(1)][HMAC(32)][IV(16)][ciphertext]}：
+     * 读前 {@code SecurityUtil.HEADER_LENGTH + 8192} 字节，跳过 49 字节头后对密文前缀做
+     * AES-CTR 前缀解密（CTR 流密码无需完整密文）。HMAC 覆盖全量数据无法对前缀校验，
+     * 因此本接口仅用于类型嗅探等尽力而为场景（解密失败返回空头，不报错）。
+     * <p>
+     * 响应 payload：{@code [8B 大端逻辑长度][明文头部 ≤8KB]}。
+     * 逻辑长度 = 文件长度 - HEADER_LENGTH（钳制 ≥0），供 NameNode 回填 file_size。
+     * 本指令与 DOWNLOAD 主链路完全独立（仅读 ≤8KB，走控制包小响应），不经过 DefaultFileRegion 流式通道。
+     */
+    private void handleHeadRead(ChannelHandlerContext ctx, Packet packet) {
+        String fileHash = new String(packet.getData(), StandardCharsets.UTF_8);
+
+        File file;
+        try {
+            file = getStorageFile(fileHash);
+        } catch (IOException e) {
+            NettyHandlerHelper.sendError(ctx, "非法的文件名: " + e.getMessage());
+            return;
+        }
+
+        if (!file.exists()) {
+            NettyHandlerHelper.sendError(ctx, "文件不存在");
+            return;
+        }
+
+        long fileLength = file.length();
+        long logicalLength = Math.max(0L, fileLength - SecurityUtil.HEADER_LENGTH);
+        int readLen = (int) Math.min(fileLength, SecurityUtil.HEADER_LENGTH + HEAD_READ_MAX_PLAIN_BYTES);
+
+        byte[] plainHead = new byte[0];
+        if (readLen > SecurityUtil.HEADER_LENGTH) {
+            byte[] enc = new byte[readLen];
+            try (java.io.FileInputStream fis = new java.io.FileInputStream(file)) {
+                int off = 0;
+                while (off < readLen) {
+                    int n = fis.read(enc, off, readLen - off);
+                    if (n < 0) {
+                        break;
+                    }
+                    off += n;
+                }
+            } catch (IOException e) {
+                LOG.warn("[HeadRead] 读取文件头失败: {}", fileHash, e);
+                NettyHandlerHelper.sendError(ctx, "读取文件头失败");
+                return;
+            }
+            try {
+                plainHead = new SecurityUtil(SecurityConfig.getAesKey()).decryptHead(enc);
+            } catch (Exception e) {
+                // 尽力而为：解密失败（密钥不匹配/格式异常）返回空头，不阻断嗅探链路
+                LOG.debug("[HeadRead] 头部解密失败（按空头处理）: {}", fileHash);
+            }
+        }
+
+        java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(8 + plainHead.length);
+        buf.putLong(logicalLength);
+        buf.put(plainHead);
+        NettyHandlerHelper.sendResponse(ctx, CommandType.DATA_HEAD_READ_RESPONSE, buf.array());
+        LOG.debug("[HeadRead] 响应头部: hash={}, logicalLen={}, plainBytes={}",
+                fileHash, logicalLength, plainHead.length);
     }
 
     // ==================== 副本拉取相关（源侧） ====================
