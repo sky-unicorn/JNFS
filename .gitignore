@@ -40,3 +40,4 @@ dashboard_users.properties
 dist-test/**
 docs/design/**
 jnfs.**.db
+**/node_modules/**
